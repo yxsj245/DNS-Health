@@ -179,6 +179,13 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
+	// 环境变量 SERVER_PORT 可覆盖配置文件中的端口
+	if envPort := os.Getenv("SERVER_PORT"); envPort != "" {
+		if p, err := fmt.Sscanf(envPort, "%d", &cfg.Server.Port); err != nil || p != 1 {
+			log.Printf("环境变量 SERVER_PORT 值无效: %s，使用配置文件端口", envPort)
+		}
+	}
+
 	log.Printf("DNSHealth 健康检测解析启动中，监听端口: %d", cfg.Server.Port)
 
 	// 2. 加载或生成加密密钥

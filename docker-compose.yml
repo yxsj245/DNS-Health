@@ -1,6 +1,6 @@
 services:
   dns-health-monitor:
-    build: .
+    image: 
     container_name: dns-health-monitor
     restart: unless-stopped
     ports:
@@ -10,6 +10,7 @@ services:
       - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
+      - SERVER_PORT=8080
     # ICMP 探测需要 NET_RAW 权限
     cap_add:
       - NET_RAW
