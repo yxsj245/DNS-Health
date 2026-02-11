@@ -44,9 +44,22 @@ type CNAMEResolver interface {
 	// 添加新出现的IP，删除已消失的IP，保留未变化的IP及其健康状态。
 	UpdateTargets(ctx context.Context, taskID uint, ips []string) error
 
+	// UpdateTargetsForCNAME 更新指定CNAME记录的目标IP列表
+	// 按CNAME记录维度管理IP列表，每个IP关联到所属的CNAME记录值。
+	// cnameValue: CNAME记录的值（如 download.example.com）
+	UpdateTargetsForCNAME(ctx context.Context, taskID uint, cnameValue string, ips []string) error
+
 	// GetFailedIPCount 获取失败IP数量
 	// 统计指定任务下健康状态为 unhealthy 的CNAME目标数量
 	GetFailedIPCount(ctx context.Context, taskID uint) (int, error)
+
+	// GetFailedIPCountByCNAME 按CNAME记录获取失败IP数量
+	// 统计指定任务下某条CNAME记录的unhealthy目标数量
+	GetFailedIPCountByCNAME(ctx context.Context, taskID uint, cnameValue string) (int, error)
+
+	// GetTotalIPCountByCNAME 按CNAME记录获取IP总数
+	// 统计指定任务下某条CNAME记录的目标总数
+	GetTotalIPCountByCNAME(ctx context.Context, taskID uint, cnameValue string) (int, error)
 
 	// CalculateThreshold 计算实际失败阈值
 	// 根据任务配置的阈值类型（个数或百分比）和当前IP总数，
@@ -182,6 +195,85 @@ func (r *cnameResolverImpl) GetFailedIPCount(ctx context.Context, taskID uint) (
 	}
 
 	return int(count), nil
+}
+
+// GetFailedIPCountByCNAME 按CNAME记录获取失败IP数量
+// 统计指定任务下某条CNAME记录的unhealthy目标数量
+func (r *cnameResolverImpl) GetFailedIPCountByCNAME(ctx context.Context, taskID uint, cnameValue string) (int, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Model(&model.CNAMETarget{}).
+		Where("task_id = ? AND cname_value = ? AND health_status = ?", taskID, cnameValue, string(model.HealthStatusUnhealthy)).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("查询CNAME %s 的失败IP数量失败: %w", cnameValue, err)
+	}
+	return int(count), nil
+}
+
+// GetTotalIPCountByCNAME 按CNAME记录获取IP总数
+// 统计指定任务下某条CNAME记录的目标总数
+func (r *cnameResolverImpl) GetTotalIPCountByCNAME(ctx context.Context, taskID uint, cnameValue string) (int, error) {
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Model(&model.CNAMETarget{}).
+		Where("task_id = ? AND cname_value = ?", taskID, cnameValue).
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("查询CNAME %s 的IP总数失败: %w", cnameValue, err)
+	}
+	return int(count), nil
+}
+
+// UpdateTargetsForCNAME 更新指定CNAME记录的目标IP列表
+// 按CNAME记录维度管理IP列表，每个IP关联到所属的CNAME记录值。
+func (r *cnameResolverImpl) UpdateTargetsForCNAME(ctx context.Context, taskID uint, cnameValue string, ips []string) error {
+	// 查询当前数据库中该任务该CNAME的所有目标
+	var currentTargets []model.CNAMETarget
+	if err := r.db.WithContext(ctx).
+		Where("task_id = ? AND cname_value = ?", taskID, cnameValue).
+		Find(&currentTargets).Error; err != nil {
+		return fmt.Errorf("查询CNAME %s 的当前目标失败: %w", cnameValue, err)
+	}
+
+	// 构建当前IP集合
+	currentIPSet := make(map[string]bool, len(currentTargets))
+	for _, target := range currentTargets {
+		currentIPSet[target.IP] = true
+	}
+
+	// 构建新IP集合
+	newIPSet := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		newIPSet[ip] = true
+	}
+
+	// 使用事务执行增量更新
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 添加新出现的IP
+		for _, ip := range ips {
+			if !currentIPSet[ip] {
+				target := model.CNAMETarget{
+					TaskID:       taskID,
+					CNAMEValue:   cnameValue,
+					IP:           ip,
+					HealthStatus: string(model.HealthStatusUnknown),
+				}
+				if err := tx.Create(&target).Error; err != nil {
+					return fmt.Errorf("添加CNAME目标 '%s'(CNAME=%s) 失败: %w", ip, cnameValue, err)
+				}
+			}
+		}
+
+		// 删除已消失的IP
+		for _, target := range currentTargets {
+			if !newIPSet[target.IP] {
+				if err := tx.Delete(&target).Error; err != nil {
+					return fmt.Errorf("删除CNAME目标 '%s'(CNAME=%s) 失败: %w", target.IP, cnameValue, err)
+				}
+			}
+		}
+
+		return nil
+	})
 }
 
 // CalculateThreshold 计算实际失败阈值

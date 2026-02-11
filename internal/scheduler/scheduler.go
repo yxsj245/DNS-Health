@@ -327,9 +327,16 @@ func (s *Scheduler) executeProbe(ctx context.Context, runner *taskRunner, prov p
 
 // executePauseDeleteProbe 执行暂停/删除类型任务的探测（原有逻辑，增加API重试）
 // 对DNS Provider的ListRecords调用增加重试和退避策略
+// 根据记录类型分发：CNAME类型走专门的CNAME探测逻辑，A/AAAA类型走原有逻辑
 // 验证需求：12.5（API失败重试）、12.6（限流退避策略）
 func (s *Scheduler) executePauseDeleteProbe(ctx context.Context, runner *taskRunner, prov provider.DNSProvider) {
 	task := runner.task
+
+	// CNAME记录类型走专门的探测逻辑：解析CNAME→探测IP→根据阈值暂停/删除CNAME记录
+	if model.RecordType(task.RecordType) == model.RecordTypeCNAME {
+		s.executeCNAMEPauseDeleteProbe(ctx, runner, prov)
+		return
+	}
 
 	// 1. 从 DNSProvider 获取当前域名的所有解析记录（A 和 AAAA 类型），带重试
 	aRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
@@ -406,6 +413,281 @@ func (s *Scheduler) executePauseDeleteProbe(ctx context.Context, runner *taskRun
 	}
 }
 
+// executeCNAMEPauseDeleteProbe 执行暂停/删除+CNAME类型任务的探测
+// 流程：
+// 1. 获取域名下所有CNAME记录
+// 2. 分别解析每条CNAME记录指向的IP
+// 3. 对每个IP进行健康探测
+// 4. 按CNAME记录维度统计失败IP数量，与阈值比较
+// 5. 某条CNAME下的失败IP达到阈值时，只暂停/删除那一条CNAME记录
+// 6. 某条CNAME下的IP恢复健康时，恢复那一条CNAME记录
+func (s *Scheduler) executeCNAMEPauseDeleteProbe(ctx context.Context, runner *taskRunner, prov provider.DNSProvider) {
+	task := runner.task
+
+	// 检查CNAME解析器是否可用
+	if s.cnameResolver == nil {
+		log.Printf("任务 %d: CNAME类型任务需要CNAME解析器，但未配置", task.ID)
+		return
+	}
+
+	// 1. 获取当前域名下所有CNAME记录
+	cnameRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+		return prov.ListRecords(ctx, task.Domain, task.SubDomain, "CNAME")
+	})
+	if err != nil {
+		log.Printf("任务 %d: 获取CNAME记录失败: %v", task.ID, err)
+		return
+	}
+
+	// 同时获取已删除的CNAME记录缓存（用于恢复判断）
+	deletedRecords, err := s.cache.ListByTask(task.ID)
+	if err != nil {
+		log.Printf("任务 %d: 获取已删除CNAME记录缓存失败: %v", task.ID, err)
+	}
+
+	// 构建所有需要处理的CNAME值列表（在线 + 已删除）
+	// cnameValue -> recordID（在线记录有值，已删除记录为空）
+	type cnameInfo struct {
+		recordID string // DNS记录ID（在线记录有值）
+		status   string // 记录状态（在线记录有值）
+		ttl      int    // TTL
+		isOnline bool   // 是否在线（未被删除）
+	}
+	cnameMap := make(map[string]*cnameInfo)
+
+	for _, record := range cnameRecords {
+		cnameMap[record.Value] = &cnameInfo{
+			recordID: record.RecordID,
+			status:   record.Status,
+			ttl:      record.TTL,
+			isOnline: true,
+		}
+	}
+	for _, dr := range deletedRecords {
+		if dr.RecordType == "CNAME" {
+			if _, exists := cnameMap[dr.IP]; !exists {
+				cnameMap[dr.IP] = &cnameInfo{
+					ttl:      dr.TTL,
+					isOnline: false,
+				}
+			}
+		}
+	}
+
+	if len(cnameMap) == 0 {
+		log.Printf("任务 %d: 未找到任何CNAME记录（在线或已删除），跳过探测", task.ID)
+		return
+	}
+
+	// 创建探测器
+	p := prober.NewProber(prober.ProbeProtocol(task.ProbeProtocol))
+	if p == nil {
+		log.Printf("任务 %d: 不支持的探测协议 %s", task.ID, task.ProbeProtocol)
+		return
+	}
+	timeout := time.Duration(task.TimeoutMs) * time.Millisecond
+
+	// 2. 逐条CNAME记录处理：解析IP → 探测 → 按记录维度判断
+	for cnameValue, info := range cnameMap {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// 2.1 解析该CNAME记录指向的所有IP
+		ips, err := s.cnameResolver.ResolveIPs(ctx, cnameValue)
+		if err != nil {
+			log.Printf("任务 %d: 解析CNAME %s 失败: %v，保持现有目标", task.ID, cnameValue, err)
+			ips = nil
+		}
+
+		// 2.2 更新该CNAME记录的目标IP列表
+		if ips != nil {
+			if err := s.cnameResolver.UpdateTargetsForCNAME(ctx, task.ID, cnameValue, ips); err != nil {
+				log.Printf("任务 %d: 更新CNAME %s 的目标列表失败: %v", task.ID, cnameValue, err)
+			}
+		}
+
+		// 2.3 从数据库加载该CNAME记录的目标列表
+		var targets []model.CNAMETarget
+		if err := s.db.Where("task_id = ? AND cname_value = ?", task.ID, cnameValue).Find(&targets).Error; err != nil {
+			log.Printf("任务 %d: 加载CNAME %s 的目标列表失败: %v", task.ID, cnameValue, err)
+			continue
+		}
+
+		if len(targets) == 0 {
+			log.Printf("任务 %d: CNAME %s 目标列表为空，跳过", task.ID, cnameValue)
+			continue
+		}
+
+		// 2.4 对每个IP进行探测
+		for i := range targets {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			target := &targets[i]
+			result := p.Probe(ctx, target.IP, task.ProbePort, timeout)
+			s.saveProbeResult(task.ID, target.IP, result)
+			s.updateCNAMETargetHealth(target, result.Success, task.FailThreshold, task.RecoverThreshold)
+		}
+
+		// 2.5 按该CNAME记录维度统计失败IP
+		failedCount, err := s.cnameResolver.GetFailedIPCountByCNAME(ctx, task.ID, cnameValue)
+		if err != nil {
+			log.Printf("任务 %d: 获取CNAME %s 的失败IP数量失败: %v", task.ID, cnameValue, err)
+			continue
+		}
+
+		totalIPs := len(targets)
+		threshold := s.cnameResolver.CalculateThreshold(&runner.task, totalIPs)
+
+		log.Printf("任务 %d: CNAME %s 探测完成，失败IP: %d/%d，阈值: %d",
+			task.ID, cnameValue, failedCount, totalIPs, threshold)
+
+		// 2.6 根据失败数量和阈值决定操作（只针对这一条CNAME记录）
+		if failedCount >= threshold && threshold > 0 && info.isOnline {
+			// 失败达到阈值且记录在线 -> 暂停/删除这条CNAME记录
+			s.pauseOrDeleteCNAMERecord(ctx, runner, prov, cnameValue, info.recordID, info.ttl, failedCount, totalIPs, threshold)
+		} else if (failedCount < threshold || threshold == 0) && !info.isOnline {
+			// 恢复健康且记录已被删除 -> 重新添加这条CNAME记录
+			s.restoreCNAMERecord(ctx, runner, prov, cnameValue, info.ttl)
+		} else if (failedCount < threshold || threshold == 0) && info.isOnline &&
+			(info.status == "paused" || info.status == "DISABLE") {
+			// 恢复健康且记录已暂停 -> 恢复这条CNAME记录
+			s.resumeCNAMERecord(ctx, runner, prov, cnameValue, info.recordID)
+		}
+	}
+}
+
+// pauseOrDeleteCNAMERecord 暂停或删除一条CNAME记录
+func (s *Scheduler) pauseOrDeleteCNAMERecord(ctx context.Context, runner *taskRunner, prov provider.DNSProvider,
+	cnameValue, recordID string, ttl, failedCount, totalIPs, threshold int) {
+	task := runner.task
+
+	// 尝试暂停
+	err := retry.Do(ctx, s.retryConfig, func() error {
+		return prov.PauseRecord(ctx, recordID)
+	})
+	if err != nil {
+		// 暂停失败，尝试删除
+		log.Printf("任务 %d: 暂停CNAME记录 %s 失败，尝试删除: %v", task.ID, cnameValue, err)
+		err = retry.Do(ctx, s.retryConfig, func() error {
+			return prov.DeleteRecord(ctx, recordID)
+		})
+		if err != nil {
+			log.Printf("任务 %d: 删除CNAME记录 %s 失败: %v", task.ID, cnameValue, err)
+			s.saveOperationLog(task.ID, "delete", recordID, cnameValue, "CNAME", false,
+				fmt.Sprintf("删除CNAME记录失败: %v", err))
+		} else {
+			// 删除成功，缓存以便恢复
+			s.cache.Add(model.DeletedRecord{
+				TaskID:     task.ID,
+				Domain:     task.Domain,
+				SubDomain:  task.SubDomain,
+				RecordType: "CNAME",
+				IP:         cnameValue,
+				TTL:        ttl,
+			})
+			s.saveOperationLog(task.ID, "delete", recordID, cnameValue, "CNAME", true,
+				fmt.Sprintf("CNAME %s 失败IP %d/%d 达到阈值 %d，删除记录", cnameValue, failedCount, totalIPs, threshold))
+			log.Printf("任务 %d: 已删除CNAME记录 %s", task.ID, cnameValue)
+
+			if s.notificationManager != nil {
+				s.notificationManager.Notify(notification.NotificationEvent{
+					Type:         model.EventTypeFailover,
+					TaskID:       task.ID,
+					Domain:       task.Domain,
+					SubDomain:    task.SubDomain,
+					OccurredAt:   time.Now(),
+					HealthStatus: "unhealthy",
+				})
+			}
+		}
+	} else {
+		s.saveOperationLog(task.ID, "pause", recordID, cnameValue, "CNAME", true,
+			fmt.Sprintf("CNAME %s 失败IP %d/%d 达到阈值 %d，暂停记录", cnameValue, failedCount, totalIPs, threshold))
+		log.Printf("任务 %d: 已暂停CNAME记录 %s", task.ID, cnameValue)
+
+		if s.notificationManager != nil {
+			s.notificationManager.Notify(notification.NotificationEvent{
+				Type:         model.EventTypeFailover,
+				TaskID:       task.ID,
+				Domain:       task.Domain,
+				SubDomain:    task.SubDomain,
+				OccurredAt:   time.Now(),
+				HealthStatus: "unhealthy",
+			})
+		}
+	}
+}
+
+// restoreCNAMERecord 恢复一条已删除的CNAME记录
+func (s *Scheduler) restoreCNAMERecord(ctx context.Context, runner *taskRunner, prov provider.DNSProvider,
+	cnameValue string, ttl int) {
+	task := runner.task
+
+	_, err := retry.DoWithResult(ctx, s.retryConfig, func() (string, error) {
+		return prov.AddRecord(ctx, task.Domain, task.SubDomain, "CNAME", cnameValue, ttl)
+	})
+	if err != nil {
+		log.Printf("任务 %d: 恢复CNAME记录 %s 失败: %v", task.ID, cnameValue, err)
+		s.saveOperationLog(task.ID, "add", "", cnameValue, "CNAME", false,
+			fmt.Sprintf("恢复CNAME记录失败: %v", err))
+	} else {
+		s.cache.Remove(task.ID, cnameValue)
+		s.saveOperationLog(task.ID, "add", "", cnameValue, "CNAME", true,
+			fmt.Sprintf("CNAME %s 下IP恢复健康，重新添加记录", cnameValue))
+		log.Printf("任务 %d: 已恢复CNAME记录 %s", task.ID, cnameValue)
+
+		if s.notificationManager != nil {
+			s.notificationManager.Notify(notification.NotificationEvent{
+				Type:           model.EventTypeRecovery,
+				TaskID:         task.ID,
+				Domain:         task.Domain,
+				SubDomain:      task.SubDomain,
+				OccurredAt:     time.Now(),
+				RecoveredValue: cnameValue,
+				HealthStatus:   "healthy",
+			})
+		}
+	}
+}
+
+// resumeCNAMERecord 恢复一条已暂停的CNAME记录
+func (s *Scheduler) resumeCNAMERecord(ctx context.Context, runner *taskRunner, prov provider.DNSProvider,
+	cnameValue, recordID string) {
+	task := runner.task
+
+	err := retry.Do(ctx, s.retryConfig, func() error {
+		return prov.ResumeRecord(ctx, recordID)
+	})
+	if err != nil {
+		log.Printf("任务 %d: 恢复暂停的CNAME记录 %s 失败: %v", task.ID, cnameValue, err)
+		s.saveOperationLog(task.ID, "resume", recordID, cnameValue, "CNAME", false,
+			fmt.Sprintf("恢复暂停的CNAME记录失败: %v", err))
+	} else {
+		s.saveOperationLog(task.ID, "resume", recordID, cnameValue, "CNAME", true,
+			fmt.Sprintf("CNAME %s 下IP恢复健康，恢复暂停的记录", cnameValue))
+		log.Printf("任务 %d: 已恢复暂停的CNAME记录 %s", task.ID, cnameValue)
+
+		if s.notificationManager != nil {
+			s.notificationManager.Notify(notification.NotificationEvent{
+				Type:           model.EventTypeRecovery,
+				TaskID:         task.ID,
+				Domain:         task.Domain,
+				SubDomain:      task.SubDomain,
+				OccurredAt:     time.Now(),
+				RecoveredValue: cnameValue,
+				HealthStatus:   "healthy",
+			})
+		}
+	}
+}
+
 // executeSwitchProbe 执行切换类型任务的探测
 // 根据解析记录类型（CNAME / A / AAAA）分发到不同的处理逻辑
 func (s *Scheduler) executeSwitchProbe(ctx context.Context, runner *taskRunner, prov provider.DNSProvider) {
@@ -451,22 +733,31 @@ func (s *Scheduler) executeCNAMESwitchProbe(ctx context.Context, runner *taskRun
 		fullDomain = task.SubDomain + "." + task.Domain
 	}
 
-	// 2. 解析CNAME记录指向的所有IP
-	ips, err := s.cnameResolver.ResolveIPs(ctx, fullDomain)
+	// 2. 获取当前CNAME记录值（用于关联CNAMETarget）
+	cnameValue := fullDomain // 默认使用完整域名
+	cnameRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+		return prov.ListRecords(ctx, task.Domain, task.SubDomain, "CNAME")
+	})
+	if err == nil && len(cnameRecords) > 0 {
+		cnameValue = cnameRecords[0].Value // 使用实际的CNAME记录值
+	}
+
+	// 3. 解析CNAME记录指向的所有IP
+	ips, err := s.cnameResolver.ResolveIPs(ctx, cnameValue)
 	if err != nil {
 		log.Printf("任务 %d: 解析CNAME记录失败: %v，保持现有目标列表", task.ID, err)
 		// 解析失败时，继续使用现有的目标列表进行探测
 		ips = nil
 	}
 
-	// 3. 如果解析成功，更新CNAMETarget表中的IP列表
+	// 4. 如果解析成功，更新CNAMETarget表中的IP列表（关联到CNAME记录值）
 	if ips != nil {
-		if err := s.cnameResolver.UpdateTargets(ctx, task.ID, ips); err != nil {
+		if err := s.cnameResolver.UpdateTargetsForCNAME(ctx, task.ID, cnameValue, ips); err != nil {
 			log.Printf("任务 %d: 更新CNAME目标列表失败: %v", task.ID, err)
 		}
 	}
 
-	// 4. 从数据库加载当前的CNAME目标列表
+	// 5. 从数据库加载当前的CNAME目标列表
 	var targets []model.CNAMETarget
 	if err := s.db.Where("task_id = ?", task.ID).Find(&targets).Error; err != nil {
 		log.Printf("任务 %d: 加载CNAME目标列表失败: %v", task.ID, err)

@@ -222,13 +222,6 @@ func validateTaskRequest(req *CreateTaskRequest, db *gorm.DB, pm pool.PoolManage
 		return "切换类型任务必须关联解析池"
 	}
 
-	// 验证 CNAME 暂停/删除类型任务必须关联解析池
-	if req.TaskType == string(model.TaskTypePauseDelete) &&
-		req.RecordType == string(model.RecordTypeCNAME) &&
-		req.PoolID == nil {
-		return "CNAME 暂停/删除类型任务必须关联解析池"
-	}
-
 	// 如果指定了解析池，验证池是否存在以及池类型与任务类型是否匹配
 	if req.PoolID != nil {
 		if pm == nil {

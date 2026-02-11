@@ -224,37 +224,70 @@
         <!-- CNAME 信息标签页：仅CNAME记录类型显示 -->
         <el-tab-pane v-if="task.record_type === 'CNAME'" label="CNAME 信息" name="cname">
           <div v-loading="cnameLoading">
-            <!-- 阈值配置信息 -->
-            <el-descriptions :column="2" border class="cname-threshold-info">
+            <!-- 全局阈值配置信息 -->
+            <el-descriptions :column="3" border class="cname-threshold-info">
               <el-descriptions-item label="阈值类型">
                 {{ cnameInfo.threshold_type === 'percent' ? '百分比' : '个数' }}
               </el-descriptions-item>
               <el-descriptions-item label="阈值数值">{{ cnameInfo.threshold }}</el-descriptions-item>
-              <el-descriptions-item label="失败计数">{{ cnameInfo.failed_count }}</el-descriptions-item>
+              <el-descriptions-item label="总失败数">{{ cnameInfo.failed_count }}</el-descriptions-item>
             </el-descriptions>
 
-            <!-- 目标IP列表 -->
-            <el-table
-              :data="cnameInfo.targets"
-              border
-              stripe
-              style="width: 100%; margin-top: 16px"
-              empty-text="暂无CNAME目标IP"
-            >
-              <el-table-column prop="ip" label="目标IP" min-width="150" />
-              <el-table-column label="健康状态" min-width="120">
-                <template #default="{ row }">
-                  <el-tag v-if="row.health_status === 'healthy'" type="success">健康</el-tag>
-                  <el-tag v-else-if="row.health_status === 'unhealthy'" type="danger">不健康</el-tag>
-                  <el-tag v-else type="info">未知</el-tag>
+            <!-- 按CNAME记录分组展示 -->
+            <div v-if="cnameInfo.records && cnameInfo.records.length > 0">
+              <el-card
+                v-for="record in cnameInfo.records"
+                :key="record.cname_value"
+                class="cname-record-card"
+                shadow="never"
+              >
+                <template #header>
+                  <div class="cname-record-header">
+                    <div class="cname-record-title">
+                      <el-icon><Link /></el-icon>
+                      <span>{{ record.cname_value || '（未关联CNAME）' }}</span>
+                    </div>
+                    <div class="cname-record-stats">
+                      <el-tag
+                        :type="record.failed_ip_count >= record.threshold && record.threshold > 0 ? 'danger' : 'success'"
+                        effect="plain"
+                        size="small"
+                      >
+                        失败 {{ record.failed_ip_count }} / {{ record.total_ip_count }}
+                      </el-tag>
+                      <el-tag type="info" effect="plain" size="small">
+                        阈值 {{ record.threshold }}
+                      </el-tag>
+                    </div>
+                  </div>
                 </template>
-              </el-table-column>
-              <el-table-column label="延迟" min-width="100">
-                <template #default="{ row }">
-                  {{ row.latency_ms !== undefined && row.latency_ms !== null ? row.latency_ms + ' ms' : '-' }}
-                </template>
-              </el-table-column>
-            </el-table>
+                <el-table
+                  :data="record.targets"
+                  border
+                  stripe
+                  style="width: 100%"
+                  empty-text="暂无目标IP"
+                  size="small"
+                >
+                  <el-table-column prop="ip" label="目标IP" min-width="150" />
+                  <el-table-column label="健康状态" min-width="120">
+                    <template #default="{ row }">
+                      <el-tag v-if="row.health_status === 'healthy'" type="success" size="small">健康</el-tag>
+                      <el-tag v-else-if="row.health_status === 'unhealthy'" type="danger" size="small">不健康</el-tag>
+                      <el-tag v-else type="info" size="small">未知</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="last_probe_at" label="最后探测时间" min-width="180">
+                    <template #default="{ row }">
+                      {{ row.last_probe_at || '-' }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </el-card>
+            </div>
+
+            <!-- 无数据时的提示 -->
+            <el-empty v-else description="暂无CNAME目标信息" />
           </div>
         </el-tab-pane>
 
@@ -324,6 +357,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Link } from '@element-plus/icons-vue'
 import api from '../api'
 
 // ==================== 路由 ====================
@@ -390,6 +424,7 @@ const ipsLoading = ref(false)
 // CNAME 信息相关状态
 const cnameLoading = ref(false)
 const cnameInfo = reactive({
+  records: [],
   targets: [],
   failed_count: 0,
   threshold: 0,
@@ -582,13 +617,14 @@ const handleIncludeIP = async (row) => {
 
 /**
  * 获取CNAME信息
- * 从 GET /api/tasks/:id/cname 获取CNAME解析目标IP及健康状态
+ * 从 GET /api/tasks/:id/cname 获取CNAME解析目标IP及健康状态（按CNAME记录分组）
  */
 const fetchCnameInfo = async () => {
   cnameLoading.value = true
   try {
     const response = await api.get(`/tasks/${taskId}/cname`)
     const data = response.data || {}
+    cnameInfo.records = data.records || []
     cnameInfo.targets = data.targets || []
     cnameInfo.failed_count = data.failed_count || 0
     cnameInfo.threshold = data.threshold || 0
@@ -671,6 +707,39 @@ onMounted(() => {
 /* CNAME 阈值信息区域 */
 .cname-threshold-info {
   margin-bottom: 16px;
+}
+
+/* CNAME 记录分组卡片 */
+.cname-record-card {
+  margin-top: 16px;
+}
+
+/* CNAME 记录卡片头部 */
+.cname-record-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* CNAME 记录标题 */
+.cname-record-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.cname-record-title .el-icon {
+  font-size: 16px;
+  color: #409eff;
+}
+
+/* CNAME 记录统计标签 */
+.cname-record-stats {
+  display: flex;
+  gap: 8px;
 }
 
 /* 筛选栏 */

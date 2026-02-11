@@ -48,6 +48,11 @@ func InitDB(dbPath string) (*gorm.DB, error) {
 		log.Printf("警告：迁移现有任务数据失败: %v", migrateErr)
 	}
 
+	// 清理旧的CNAME目标数据（cname_value为空的记录，下次探测会重新创建带关联的记录）
+	if migrateErr := cleanOrphanCNAMETargets(db); migrateErr != nil {
+		log.Printf("警告：清理旧CNAME目标数据失败: %v", migrateErr)
+	}
+
 	return db, nil
 }
 
@@ -66,6 +71,19 @@ func migrateExistingTasks(db *gorm.DB) error {
 	}
 	if result.RowsAffected > 0 {
 		log.Printf("已将 %d 个现有任务标记为 pause_delete 类型", result.RowsAffected)
+	}
+	return nil
+}
+
+// cleanOrphanCNAMETargets 清理旧的CNAME目标数据
+// 删除 cname_value 为空的记录，下次探测时会重新创建带 cname_value 关联的记录
+func cleanOrphanCNAMETargets(db *gorm.DB) error {
+	result := db.Where("cname_value = '' OR cname_value IS NULL").Delete(&model.CNAMETarget{})
+	if result.Error != nil {
+		return fmt.Errorf("清理旧CNAME目标数据失败: %w", result.Error)
+	}
+	if result.RowsAffected > 0 {
+		log.Printf("已清理 %d 条未关联CNAME记录的旧目标数据", result.RowsAffected)
 	}
 	return nil
 }

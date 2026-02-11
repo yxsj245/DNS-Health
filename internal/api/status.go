@@ -63,14 +63,25 @@ type PaginatedResponse struct {
 // 展示CNAME记录解析出的每个IP地址及其健康状态
 type CNAMETargetResponse struct {
 	IP           string `json:"ip"`            // IP地址
+	CNAMEValue   string `json:"cname_value"`   // 所属CNAME记录值
 	HealthStatus string `json:"health_status"` // 健康状态: healthy / unhealthy / unknown
 	LastProbeAt  string `json:"last_probe_at"` // 最后探测时间
 }
 
+// CNAMERecordInfo 单条CNAME记录的汇总信息
+type CNAMERecordInfo struct {
+	CNAMEValue    string                `json:"cname_value"`     // CNAME记录值（如 download.example.com）
+	Targets       []CNAMETargetResponse `json:"targets"`         // 该CNAME下的IP列表
+	TotalIPCount  int                   `json:"total_ip_count"`  // 该CNAME下IP总数
+	FailedIPCount int                   `json:"failed_ip_count"` // 该CNAME下失败IP数量
+	Threshold     int                   `json:"threshold"`       // 该CNAME下计算的失败阈值
+}
+
 // CNAMEInfoResponse CNAME信息响应
-// 当任务类型为CNAME时，在历史查询响应中附带CNAME相关信息
+// 当任务类型为CNAME时，按CNAME记录分组展示IP健康状态
 type CNAMEInfoResponse struct {
-	Targets       []CNAMETargetResponse `json:"targets"`         // CNAME目标IP列表及健康状态
+	Records       []CNAMERecordInfo     `json:"records"`         // 按CNAME记录分组的信息
+	Targets       []CNAMETargetResponse `json:"targets"`         // 所有CNAME目标IP列表（兼容旧版）
 	TotalIPCount  int                   `json:"total_ip_count"`  // IP总数
 	FailedIPCount int                   `json:"failed_ip_count"` // 失败IP数量
 	Threshold     int                   `json:"threshold"`       // 当前计算的失败阈值
@@ -230,6 +241,7 @@ func (h *StatusHandler) GetCNAMEInfo(c *gin.Context) {
 
 	info := h.buildCNAMEInfo(&task)
 	c.JSON(http.StatusOK, gin.H{
+		"records":        info.Records,
 		"targets":        info.Targets,
 		"total_ip_count": info.TotalIPCount,
 		"failed_count":   info.FailedIPCount,
@@ -240,17 +252,15 @@ func (h *StatusHandler) GetCNAMEInfo(c *gin.Context) {
 
 // buildCNAMEInfo 构建CNAME信息响应
 // 查询该任务关联的所有CNAME目标IP及其健康状态，
-// 统计失败IP数量，并计算当前阈值。
-// 验证需求：3.1 - 显示CNAME目标IP列表
-// 验证需求：7.5 - 显示失败IP数量和阈值
+// 按CNAME记录分组统计失败IP数量和阈值。
 func (h *StatusHandler) buildCNAMEInfo(task *model.ProbeTask) *CNAMEInfoResponse {
 	// 查询该任务的所有CNAME目标
 	var targets []model.CNAMETarget
 	if err := h.DB.Where("task_id = ?", task.ID).
-		Order("ip ASC").
+		Order("cname_value ASC, ip ASC").
 		Find(&targets).Error; err != nil {
-		// 查询失败时返回空的CNAME信息
 		return &CNAMEInfoResponse{
+			Records:       []CNAMERecordInfo{},
 			Targets:       []CNAMETargetResponse{},
 			TotalIPCount:  0,
 			FailedIPCount: 0,
@@ -258,34 +268,67 @@ func (h *StatusHandler) buildCNAMEInfo(task *model.ProbeTask) *CNAMEInfoResponse
 		}
 	}
 
-	// 构建CNAME目标响应列表
-	targetResponses := make([]CNAMETargetResponse, 0, len(targets))
-	failedCount := 0
+	// 按CNAME记录分组
+	cnameGroups := make(map[string][]model.CNAMETarget)
+	cnameOrder := make([]string, 0) // 保持顺序
 	for _, t := range targets {
-		lastProbe := ""
-		if t.LastProbeAt != nil {
-			lastProbe = t.LastProbeAt.Format("2006-01-02 15:04:05")
+		key := t.CNAMEValue
+		if _, exists := cnameGroups[key]; !exists {
+			cnameOrder = append(cnameOrder, key)
 		}
-		targetResponses = append(targetResponses, CNAMETargetResponse{
-			IP:           t.IP,
-			HealthStatus: t.HealthStatus,
-			LastProbeAt:  lastProbe,
-		})
-		// 统计失败IP数量
-		if t.HealthStatus == string(model.HealthStatusUnhealthy) {
-			failedCount++
-		}
+		cnameGroups[key] = append(cnameGroups[key], t)
 	}
 
-	// 计算当前阈值
+	// 构建分组响应
+	records := make([]CNAMERecordInfo, 0, len(cnameGroups))
+	allTargetResponses := make([]CNAMETargetResponse, 0, len(targets))
+	totalFailed := 0
+
+	for _, cnameValue := range cnameOrder {
+		groupTargets := cnameGroups[cnameValue]
+		groupResponses := make([]CNAMETargetResponse, 0, len(groupTargets))
+		groupFailed := 0
+
+		for _, t := range groupTargets {
+			lastProbe := ""
+			if t.LastProbeAt != nil {
+				lastProbe = t.LastProbeAt.Format("2006-01-02 15:04:05")
+			}
+			resp := CNAMETargetResponse{
+				IP:           t.IP,
+				CNAMEValue:   t.CNAMEValue,
+				HealthStatus: t.HealthStatus,
+				LastProbeAt:  lastProbe,
+			}
+			groupResponses = append(groupResponses, resp)
+			allTargetResponses = append(allTargetResponses, resp)
+			if t.HealthStatus == string(model.HealthStatusUnhealthy) {
+				groupFailed++
+				totalFailed++
+			}
+		}
+
+		groupTotal := len(groupTargets)
+		groupThreshold := cname.CalculateThreshold(task.FailThresholdType, task.FailThresholdValue, groupTotal)
+
+		records = append(records, CNAMERecordInfo{
+			CNAMEValue:    cnameValue,
+			Targets:       groupResponses,
+			TotalIPCount:  groupTotal,
+			FailedIPCount: groupFailed,
+			Threshold:     groupThreshold,
+		})
+	}
+
 	totalIPs := len(targets)
-	threshold := cname.CalculateThreshold(task.FailThresholdType, task.FailThresholdValue, totalIPs)
+	totalThreshold := cname.CalculateThreshold(task.FailThresholdType, task.FailThresholdValue, totalIPs)
 
 	return &CNAMEInfoResponse{
-		Targets:       targetResponses,
+		Records:       records,
+		Targets:       allTargetResponses,
 		TotalIPCount:  totalIPs,
-		FailedIPCount: failedCount,
-		Threshold:     threshold,
+		FailedIPCount: totalFailed,
+		Threshold:     totalThreshold,
 	}
 }
 

@@ -260,12 +260,14 @@ type PoolProbeResult struct {
 }
 
 // CNAMETarget CNAME记录解析出的IP目标
-// 当任务类型为CNAME时，系统会解析CNAME记录指向的所有IP地址，
-// 并对每个IP进行独立的健康探测
+// 当任务类型为CNAME时，系统会解析每条CNAME记录指向的所有IP地址，
+// 并对每个IP进行独立的健康探测。每个IP关联到它所属的CNAME记录值，
+// 以便按CNAME记录维度统计健康状态和执行暂停/删除操作。
 type CNAMETarget struct {
-	ID     uint   `gorm:"primaryKey"`
-	TaskID uint   `gorm:"index;not null"` // 所属任务ID
-	IP     string `gorm:"not null"`       // 解析出的IP地址
+	ID         uint   `gorm:"primaryKey"`
+	TaskID     uint   `gorm:"index;not null"`      // 所属任务ID
+	CNAMEValue string `gorm:"not null;default:''"` // 所属CNAME记录的值（如 download.example.com）
+	IP         string `gorm:"not null"`            // 解析出的IP地址
 
 	// 健康状态
 	HealthStatus         string `gorm:"not null;default:'unknown'"` // 健康状态: healthy / unhealthy / unknown

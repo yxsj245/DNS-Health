@@ -149,7 +149,7 @@
             <template #header>
               <div class="section-header">
                 <el-icon><Switch /></el-icon>
-                <span>故障转移配置</span>
+                <span>{{ showPoolField ? '故障转移配置' : 'CNAME 阈值配置' }}</span>
               </div>
             </template>
             <el-form-item v-if="showPoolField" label="解析池" prop="pool_id">
@@ -299,7 +299,7 @@
           <template #header>
             <div class="section-header">
               <el-icon><Switch /></el-icon>
-              <span>故障转移配置</span>
+              <span>{{ showPoolField ? '故障转移配置' : 'CNAME 阈值配置' }}</span>
             </div>
           </template>
           <el-form-item v-if="showPoolField" label="解析池" prop="pool_id">
@@ -494,10 +494,10 @@ const showPortField = computed(() => {
 
 /**
  * 是否显示解析池选择器
- * 切换解析类型，或暂停/删除类型且记录类型为CNAME时显示
+ * 仅切换解析类型时显示（暂停/删除+CNAME不需要解析池，直接对CNAME记录执行暂停/删除）
  */
 const showPoolField = computed(() => {
-  return form.task_type === 'switch' || (form.task_type === 'pause_delete' && form.record_type === 'CNAME')
+  return form.task_type === 'switch'
 })
 
 /**
