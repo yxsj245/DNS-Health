@@ -290,6 +290,7 @@ func main() {
 	if _, err := os.Stat("web/dist"); err == nil {
 		router.Static("/assets", "web/dist/assets")
 		router.StaticFile("/favicon.ico", "web/dist/favicon.ico")
+		router.StaticFile("/logo.png", "web/dist/logo.png")
 
 		// 对于非 API 路由，返回 index.html（支持 SPA 前端路由）
 		router.NoRoute(func(c *gin.Context) {

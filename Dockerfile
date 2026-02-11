@@ -19,13 +19,14 @@ RUN apk add --no-cache gcc musl-dev
 
 WORKDIR /app
 
-# 先复制依赖文件，利用 Docker 缓存
-COPY go.mod go.sum ./
-RUN go mod download
-
-# 复制后端源码并编译
+# 复制所有后端源码和依赖文件
+COPY go.mod ./
+COPY go.sum* ./
 COPY main.go ./
 COPY internal/ ./internal/
+
+# 生成 go.sum 并下载依赖
+RUN go mod tidy
 
 # 启用 CGO（SQLite 需要），静态链接
 RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o dns-health-monitor .

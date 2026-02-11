@@ -1,0 +1,149 @@
+name: 构建发布
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      docker_tag:
+        description: 'Docker 镜像标签（手动触发时使用）'
+        required: false
+        default: 'dev'
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/dns-health-monitor
+
+jobs:
+  # ==================== Docker 构建推送 ====================
+  docker:
+    name: 构建 Docker 镜像
+    runs-on: ubuntu-latest
+    steps:
+      - name: 签出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 QEMU（多架构支持）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 生成 Docker 标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            # Release 触发：使用版本号
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # 手动触发：使用输入的标签
+            type=raw,value=${{ inputs.docker_tag || 'latest' }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            # Release 触发：latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+
+      - name: 构建并推送 Docker 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==================== 二进制文件构建 ====================
+  binary:
+    name: 构建二进制文件 (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            suffix: .exe
+            archive: zip
+            name: dns-health-monitor-windows-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: ""
+            archive: tar.gz
+            name: dns-health-monitor-linux-arm64
+    steps:
+      - name: 签出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: 设置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: 安装交叉编译工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+
+      - name: 编译二进制文件
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+        run: |
+          # 根据目标平台设置交叉编译器
+          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export CC=aarch64-linux-gnu-gcc
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            export CC=x86_64-w64-mingw32-gcc
+          fi
+
+          go build -ldflags="-s -w" -o dns-health-monitor${{ matrix.suffix }} .
+
+      - name: 打包文件
+        run: |
+          mkdir -p release/${{ matrix.name }}
+          cp dns-health-monitor${{ matrix.suffix }} release/${{ matrix.name }}/
+          cp config.yaml release/${{ matrix.name }}/
+          cp -r web/dist release/${{ matrix.name }}/web-dist/
+          cp README.md release/${{ matrix.name }}/ 2>/dev/null || true
+
+          cd release
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r ../${{ matrix.name }}.zip ${{ matrix.name }}/
+          else
+            tar -czf ../${{ matrix.name }}.tar.gz ${{ matrix.name }}/
+          fi
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.${{ matrix.archive }}
+
+      # 仅 Release 触发时上传到 Release
+      - name: 上传到 Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.name }}.${{ matrix.archive }}
