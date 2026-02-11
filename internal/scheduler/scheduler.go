@@ -66,11 +66,26 @@ type Scheduler struct {
 
 	// 通知管理器 - 用于在关键事件发生时发送通知（可选，nil表示不发送通知）
 	notificationManager *notification.NotificationManager
+
+	// 互联网连接检查器 - 用于在探测前检查互联网是否在线（可选，nil表示不检查）
+	connectivityChecker ConnectivityChecker
+}
+
+// ConnectivityChecker 互联网连接状态检查接口
+type ConnectivityChecker interface {
+	IsOnline() bool
 }
 
 // SchedulerOption 调度器可选配置函数类型
 // 使用函数选项模式，保持NewScheduler向后兼容
 type SchedulerOption func(*Scheduler)
+
+// WithConnectivityChecker 设置互联网连接检查器
+func WithConnectivityChecker(checker ConnectivityChecker) SchedulerOption {
+	return func(s *Scheduler) {
+		s.connectivityChecker = checker
+	}
+}
 
 // WithCNAMEResolver 设置CNAME解析器
 func WithCNAMEResolver(resolver cname.CNAMEResolver) SchedulerOption {
@@ -294,7 +309,11 @@ func (s *Scheduler) runProbeLoop(ctx context.Context, runner *taskRunner, prov p
 	defer ticker.Stop()
 
 	// 立即执行一次探测
-	s.executeProbe(ctx, runner, prov)
+	if s.connectivityChecker == nil || s.connectivityChecker.IsOnline() {
+		s.executeProbe(ctx, runner, prov)
+	} else {
+		log.Printf("任务 %d: 互联网断开，跳过探测", task.ID)
+	}
 
 	for {
 		select {
@@ -302,6 +321,10 @@ func (s *Scheduler) runProbeLoop(ctx context.Context, runner *taskRunner, prov p
 			log.Printf("任务 %d 探测循环已停止", task.ID)
 			return
 		case <-ticker.C:
+			// 检查互联网连接状态，断网时跳过探测
+			if s.connectivityChecker != nil && !s.connectivityChecker.IsOnline() {
+				continue
+			}
 			s.executeProbe(ctx, runner, prov)
 		}
 	}

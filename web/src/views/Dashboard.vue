@@ -3,6 +3,33 @@
   <div class="dashboard-page">
     <h2 class="page-title">系统总览</h2>
 
+    <!-- 互联网连接状态横幅 -->
+    <div v-if="connectivity.enabled" class="connectivity-banner" :class="connectivity.online ? 'online' : 'offline'">
+      <div class="connectivity-content">
+        <el-icon :size="22">
+          <Connection v-if="connectivity.online" />
+          <CircleCloseFilled v-else />
+        </el-icon>
+        <div class="connectivity-info">
+          <span class="connectivity-status">
+            互联网状态：{{ connectivity.online ? '正常' : '已断开' }}
+          </span>
+          <span v-if="!connectivity.online" class="connectivity-detail">
+            （连续失败 {{ connectivity.consecutive_fails }} 次，所有探测和监控任务已暂停）
+          </span>
+          <span v-if="!connectivity.online && connectivity.down_since" class="connectivity-detail">
+            · 断开时间：{{ formatTime(connectivity.down_since) }}
+          </span>
+          <span v-if="connectivity.online && connectivity.consecutive_fails > 0" class="connectivity-detail connectivity-warning">
+            （当前连续失败 {{ connectivity.consecutive_fails }} 次 / 阈值 {{ connectivity.fail_threshold }}）
+          </span>
+        </div>
+      </div>
+      <div class="connectivity-meta">
+        <span v-if="connectivity.last_check_time">· 最后检测：{{ formatTime(connectivity.last_check_time) }}</span>
+      </div>
+    </div>
+
     <!-- 系统时间与运行时间 -->
     <el-row :gutter="16" class="summary-row">
       <el-col :span="12">
@@ -166,7 +193,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Clock, Timer } from '@element-plus/icons-vue'
+import { Clock, Timer, Connection, CircleCloseFilled } from '@element-plus/icons-vue'
 import api from '../api'
 
 // ==================== 路由 ====================
@@ -199,6 +226,21 @@ const stats = ref({
   recent_events: []
 })
 
+// 互联网连接状态
+const connectivity = ref({
+  enabled: false,
+  online: true,
+  consecutive_fails: 0,
+  consecutive_successes: 0,
+  last_check_time: null,
+  last_online_time: null,
+  down_since: null,
+  fail_threshold: 10,
+  target: ''
+})
+// 连接状态轮询定时器
+let connectivityTimer = null
+
 // ==================== 计算属性 ====================
 
 /**
@@ -230,6 +272,23 @@ const goToSystemLogs = () => {
   router.push('/system-logs')
 }
 
+/**
+ * 格式化时间为本地时间字符串
+ */
+const formatTime = (timeStr) => {
+  if (!timeStr) return ''
+  const date = new Date(timeStr)
+  if (isNaN(date.getTime())) return ''
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+}
+
 // ==================== API 调用 ====================
 
 /**
@@ -242,6 +301,19 @@ const fetchStats = async () => {
     stats.value = response.data
   } catch (error) {
     ElMessage.error('获取系统统计数据失败')
+  }
+}
+
+/**
+ * 获取互联网连接状态
+ * 调用 GET /api/connectivity
+ */
+const fetchConnectivity = async () => {
+  try {
+    const response = await api.get('/connectivity')
+    connectivity.value = response.data
+  } catch {
+    // 获取失败不影响其他功能
   }
 }
 
@@ -296,15 +368,21 @@ const updateTime = () => {
 
 onMounted(async () => {
   fetchStats()
+  fetchConnectivity()
   await fetchSystemInfo()
   updateTime()
   // 每秒更新时间
   timeTimer = setInterval(updateTime, 1000)
+  // 每5秒轮询互联网连接状态
+  connectivityTimer = setInterval(fetchConnectivity, 5000)
 })
 
 onUnmounted(() => {
   if (timeTimer) {
     clearInterval(timeTimer)
+  }
+  if (connectivityTimer) {
+    clearInterval(connectivityTimer)
   }
 })
 </script>
@@ -478,5 +556,81 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+/* 互联网连接状态横幅 */
+.connectivity-banner {
+  margin-bottom: 16px;
+  padding: 12px 20px;
+  border-radius: 8px;
+  border: 1px solid;
+}
+
+.connectivity-banner.online {
+  background: #f0f9eb;
+  border-color: #e1f3d8;
+}
+
+.connectivity-banner.offline {
+  background: #fef0f0;
+  border-color: #fde2e2;
+  animation: pulse-offline 2s ease-in-out infinite;
+}
+
+@keyframes pulse-offline {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; }
+}
+
+.connectivity-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.connectivity-banner.online .connectivity-content .el-icon {
+  color: #67c23a;
+}
+
+.connectivity-banner.offline .connectivity-content .el-icon {
+  color: #f56c6c;
+}
+
+.connectivity-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.connectivity-status {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.connectivity-banner.online .connectivity-status {
+  color: #67c23a;
+}
+
+.connectivity-banner.offline .connectivity-status {
+  color: #f56c6c;
+}
+
+.connectivity-detail {
+  font-size: 13px;
+  color: #909399;
+}
+
+.connectivity-warning {
+  color: #e6a23c;
+}
+
+.connectivity-meta {
+  margin-top: 4px;
+  margin-left: 32px;
+  font-size: 12px;
+  color: #c0c4cc;
+  display: flex;
+  gap: 6px;
 }
 </style>

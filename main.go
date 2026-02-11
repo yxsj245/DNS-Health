@@ -17,6 +17,7 @@ import (
 	"dns-health-monitor/internal/api"
 	"dns-health-monitor/internal/cache"
 	"dns-health-monitor/internal/cname"
+	"dns-health-monitor/internal/connectivity"
 	"dns-health-monitor/internal/crypto"
 	"dns-health-monitor/internal/database"
 	"dns-health-monitor/internal/failover"
@@ -247,17 +248,24 @@ func main() {
 	log.Println("通知管理器初始化完成")
 
 	// 5.4 创建调度器，注入所有依赖（包括通知管理器）
+	// 5.5 创建互联网连接检查器
+	connChecker := connectivity.NewChecker()
+
 	sched := scheduler.NewScheduler(db, deletedCache, providerFactory,
 		scheduler.WithCNAMEResolver(cnameResolver),
 		scheduler.WithFailoverExecutor(failoverExecutor),
 		scheduler.WithPoolProber(poolProber),
 		scheduler.WithResourceSelector(resourceSelector),
 		scheduler.WithNotificationManager(notifManager),
+		scheduler.WithConnectivityChecker(connChecker),
 	)
 
 	// 6. 启动调度器（使用可取消的上下文）
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 启动互联网连接检查器
+	connChecker.Start(ctx)
 
 	if err := sched.Start(ctx); err != nil {
 		log.Fatalf("启动调度器失败: %v", err)
@@ -269,6 +277,7 @@ func main() {
 	// 注入DNS服务商工厂函数，有凭证的任务将通过云服务商API查询解析记录
 	monitorExecutor.SetProviderFactory(monitor.ProviderFactory(providerFactory))
 	monitorSched := monitor.NewMonitorScheduler(db, monitorExecutor)
+	monitorSched.SetConnectivityChecker(connChecker)
 	if err := monitorSched.Start(ctx); err != nil {
 		log.Printf("启动健康监控调度器失败: %v", err)
 	} else {
@@ -296,6 +305,7 @@ func main() {
 	notifHandler := api.NewNotificationHandler(db, encryptKey, notifManager)
 
 	// 启动解析池探测调度器（恢复所有解析池的探测活动）
+	poolProber.SetConnectivityChecker(connChecker)
 	if err := poolProber.Start(ctx); err != nil {
 		log.Printf("启动解析池探测调度器失败: %v", err)
 	} else {
@@ -323,7 +333,7 @@ func main() {
 	monitorManager := monitor.NewHealthMonitorManager(db)
 	healthMonitorHandler := api.NewHealthMonitorHandler(monitorManager, monitorSched, db)
 
-	router := api.SetupRouterWithHealthMonitor(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, healthMonitorHandler, jwtSecret, useFixedSecret, startTime)
+	router := api.SetupRouterWithHealthMonitor(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, healthMonitorHandler, connChecker, jwtSecret, useFixedSecret, startTime)
 
 	// 9. 嵌入前端静态文件服务
 	// 如果 web/dist 目录存在，提供静态文件服务

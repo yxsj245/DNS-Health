@@ -2,6 +2,7 @@
 package api
 
 import (
+	"dns-health-monitor/internal/connectivity"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,7 +20,7 @@ func SetupRouter(
 	fixedJWTSecret bool,
 	startTime ...time.Time,
 ) *gin.Engine {
-	return SetupRouterWithHealthMonitor(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, nil, jwtSecret, fixedJWTSecret, startTime...)
+	return SetupRouterWithHealthMonitor(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, nil, nil, jwtSecret, fixedJWTSecret, startTime...)
 }
 
 // SetupRouterWithHealthMonitor 配置并返回 Gin 路由引擎（包含健康监控路由）
@@ -31,6 +32,7 @@ func SetupRouterWithHealthMonitor(
 	poolHandler *PoolHandler,
 	notifHandler *NotificationHandler,
 	healthMonitorHandler *HealthMonitorHandler,
+	connectivityChecker *connectivity.Checker,
 	jwtSecret []byte,
 	fixedJWTSecret bool,
 	startTime ...time.Time,
@@ -55,6 +57,26 @@ func SetupRouterWithHealthMonitor(
 				resp["start_time"] = startTime[0].Format("2006-01-02T15:04:05Z07:00")
 			}
 			c.JSON(200, resp)
+		})
+
+		// 互联网连接状态（公开，用于前端显示连接状态）
+		api.GET("/connectivity", func(c *gin.Context) {
+			if connectivityChecker == nil {
+				c.JSON(200, gin.H{"online": true, "enabled": false})
+				return
+			}
+			status := connectivityChecker.GetStatus()
+			c.JSON(200, gin.H{
+				"enabled":               true,
+				"online":                status.Online,
+				"consecutive_fails":     status.ConsecutiveFails,
+				"consecutive_successes": status.ConsecutiveSuccesses,
+				"last_check_time":       status.LastCheckTime,
+				"last_online_time":      status.LastOnlineTime,
+				"down_since":            status.DownSince,
+				"fail_threshold":        status.FailThreshold,
+				"target":                status.Target,
+			})
 		})
 
 		// 受保护接口（需要 JWT 认证）

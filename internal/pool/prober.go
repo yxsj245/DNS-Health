@@ -24,6 +24,13 @@ type PoolProber struct {
 	ctx context.Context // 长生命周期的上下文，由 Start 方法设置
 	// poolRunners 每个解析池的探测运行器，key为池ID
 	poolRunners map[uint]*poolRunner
+	// 互联网连接检查器 - 用于在探测前检查互联网是否在线（可选）
+	connectivityChecker ConnectivityChecker
+}
+
+// ConnectivityChecker 互联网连接状态检查接口
+type ConnectivityChecker interface {
+	IsOnline() bool
 }
 
 // poolRunner 单个解析池的探测运行器
@@ -42,6 +49,11 @@ func NewPoolProber(db *gorm.DB) *PoolProber {
 		db:          db,
 		poolRunners: make(map[uint]*poolRunner),
 	}
+}
+
+// SetConnectivityChecker 设置互联网连接检查器
+func (p *PoolProber) SetConnectivityChecker(checker ConnectivityChecker) {
+	p.connectivityChecker = checker
 }
 
 // Start 启动探测调度器，加载所有解析池并启动探测
@@ -211,7 +223,9 @@ func (p *PoolProber) runResourceProbeLoop(ctx context.Context, pool *model.Resol
 	defer ticker.Stop()
 
 	// 立即执行一次探测
-	p.probeResource(ctx, pool, resource.ID)
+	if p.connectivityChecker == nil || p.connectivityChecker.IsOnline() {
+		p.probeResource(ctx, pool, resource.ID)
+	}
 
 	for {
 		select {
@@ -219,6 +233,10 @@ func (p *PoolProber) runResourceProbeLoop(ctx context.Context, pool *model.Resol
 			log.Printf("解析池 %d 资源 %d (%s) 探测循环已停止", pool.ID, resource.ID, resource.Value)
 			return
 		case <-ticker.C:
+			// 检查互联网连接状态，断网时跳过探测
+			if p.connectivityChecker != nil && !p.connectivityChecker.IsOnline() {
+				continue
+			}
 			p.probeResource(ctx, pool, resource.ID)
 		}
 	}

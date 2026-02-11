@@ -30,6 +30,14 @@ type MonitorScheduler struct {
 	mu       sync.RWMutex                // 保护tasks的读写锁
 	ctx      context.Context             // 父上下文
 	cancel   context.CancelFunc          // 父上下文取消函数
+
+	// 互联网连接检查器 - 用于在监控前检查互联网是否在线（可选）
+	connectivityChecker ConnectivityChecker
+}
+
+// ConnectivityChecker 互联网连接状态检查接口
+type ConnectivityChecker interface {
+	IsOnline() bool
 }
 
 // NewMonitorScheduler 创建健康监控调度器实例
@@ -151,6 +159,11 @@ func (s *MonitorScheduler) RunningTaskCount() int {
 	return len(s.tasks)
 }
 
+// SetConnectivityChecker 设置互联网连接检查器
+func (s *MonitorScheduler) SetConnectivityChecker(checker ConnectivityChecker) {
+	s.connectivityChecker = checker
+}
+
 // startTask 启动单个健康监控任务的定时执行goroutine
 func (s *MonitorScheduler) startTask(task model.HealthMonitorTask) error {
 	if s.ctx == nil {
@@ -187,7 +200,9 @@ func (s *MonitorScheduler) runMonitorLoop(ctx context.Context, runner *monitorTa
 	defer ticker.Stop()
 
 	// 立即执行一次监控
-	s.executeMonitor(ctx, &task)
+	if s.connectivityChecker == nil || s.connectivityChecker.IsOnline() {
+		s.executeMonitor(ctx, &task)
+	}
 
 	for {
 		select {
@@ -195,6 +210,10 @@ func (s *MonitorScheduler) runMonitorLoop(ctx context.Context, runner *monitorTa
 			log.Printf("健康监控任务 %d 已停止", task.ID)
 			return
 		case <-ticker.C:
+			// 检查互联网连接状态，断网时跳过监控
+			if s.connectivityChecker != nil && !s.connectivityChecker.IsOnline() {
+				continue
+			}
 			s.executeMonitor(ctx, &task)
 		}
 	}
