@@ -12,10 +12,18 @@ COPY web/ ./
 RUN npm run build
 
 # ==================== 后端构建阶段 ====================
-FROM golang:1.24-alpine AS backend-builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS backend-builder
 
-# 安装 CGO 依赖（SQLite 需要）
-RUN apk add --no-cache gcc musl-dev
+# 接收目标平台参数
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
+# 安装 CGO 依赖和交叉编译工具链
+RUN apk add --no-cache gcc musl-dev && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+      apk add --no-cache aarch64-none-elf-gcc; \
+    fi
 
 WORKDIR /app
 
@@ -28,8 +36,9 @@ COPY internal/ ./internal/
 # 生成 go.sum 并下载依赖
 RUN go mod tidy
 
-# 启用 CGO（SQLite 需要），静态链接
-RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o dns-health-monitor .
+# 使用 Go 原生交叉编译，避免 QEMU 模拟
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-s -w" -o dns-health-monitor .
 
 # ==================== 运行阶段 ====================
 FROM alpine:3.20
