@@ -38,6 +38,10 @@ func InitDB(dbPath string) (*gorm.DB, error) {
 		&model.SMTPConfig{},
 		&model.NotificationSetting{},
 		&model.NotificationLog{},
+		// 新增：健康监控模块相关表
+		&model.HealthMonitorTask{},
+		&model.HealthMonitorTarget{},
+		&model.HealthMonitorResult{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)

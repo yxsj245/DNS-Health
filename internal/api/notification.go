@@ -70,7 +70,8 @@ type SMTPTestRequest struct {
 type NotificationSettingResponse struct {
 	ID               uint   `json:"id"`
 	TaskID           uint   `json:"task_id"`
-	TaskName         string `json:"task_name"` // 任务名称（域名+子域名）
+	TaskName         string `json:"task_name"`           // 任务名称（域名+子域名）
+	TaskType         string `json:"task_type,omitempty"` // 任务类型: probe / health_monitor
 	NotifyFailover   bool   `json:"notify_failover"`
 	NotifyRecovery   bool   `json:"notify_recovery"`
 	NotifyConsecFail bool   `json:"notify_consec_fail"`
@@ -272,9 +273,16 @@ func (h *NotificationHandler) TestSMTP(c *gin.Context) {
 // 返回所有探测任务及其通知设置（join tasks 表获取任务名称）
 func (h *NotificationHandler) GetNotificationSettings(c *gin.Context) {
 	// 查询所有探测任务
-	var tasks []model.ProbeTask
-	if err := h.db.Order("created_at DESC").Find(&tasks).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务列表失败"})
+	var probeTasks []model.ProbeTask
+	if err := h.db.Order("created_at DESC").Find(&probeTasks).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询探测任务列表失败"})
+		return
+	}
+
+	// 查询所有健康监控任务
+	var healthTasks []model.HealthMonitorTask
+	if err := h.db.Order("created_at DESC").Find(&healthTasks).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询健康监控任务列表失败"})
 		return
 	}
 
@@ -291,10 +299,11 @@ func (h *NotificationHandler) GetNotificationSettings(c *gin.Context) {
 		settingMap[settings[i].TaskID] = &settings[i]
 	}
 
-	// 构建响应列表（每个任务一条记录，包含通知设置）
-	resp := make([]NotificationSettingResponse, 0, len(tasks))
-	for _, task := range tasks {
-		// 构建任务名称
+	// 构建响应列表
+	resp := make([]NotificationSettingResponse, 0, len(probeTasks)+len(healthTasks))
+
+	// 添加探测任务
+	for _, task := range probeTasks {
 		taskName := task.Domain
 		if task.SubDomain != "" && task.SubDomain != "@" {
 			taskName = task.SubDomain + "." + task.Domain
@@ -303,9 +312,32 @@ func (h *NotificationHandler) GetNotificationSettings(c *gin.Context) {
 		item := NotificationSettingResponse{
 			TaskID:   task.ID,
 			TaskName: taskName,
+			TaskType: "probe",
 		}
 
-		// 如果有通知设置，填充设置信息
+		if setting, ok := settingMap[task.ID]; ok {
+			item.ID = setting.ID
+			item.NotifyFailover = setting.NotifyFailover
+			item.NotifyRecovery = setting.NotifyRecovery
+			item.NotifyConsecFail = setting.NotifyConsecFail
+		}
+
+		resp = append(resp, item)
+	}
+
+	// 添加健康监控任务
+	for _, task := range healthTasks {
+		taskName := task.Domain
+		if task.SubDomain != "" && task.SubDomain != "@" {
+			taskName = task.SubDomain + "." + task.Domain
+		}
+
+		item := NotificationSettingResponse{
+			TaskID:   task.ID,
+			TaskName: taskName,
+			TaskType: "health_monitor",
+		}
+
 		if setting, ok := settingMap[task.ID]; ok {
 			item.ID = setting.ID
 			item.NotifyFailover = setting.NotifyFailover
@@ -331,14 +363,13 @@ func (h *NotificationHandler) UpdateNotificationSetting(c *gin.Context) {
 		return
 	}
 
-	// 验证任务是否存在
-	var task model.ProbeTask
-	if err := h.db.First(&task, taskID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务失败"})
+	// 验证任务是否存在（探测任务或健康监控任务）
+	var probeTask model.ProbeTask
+	var healthTask model.HealthMonitorTask
+	probeErr := h.db.First(&probeTask, taskID).Error
+	healthErr := h.db.First(&healthTask, taskID).Error
+	if probeErr != nil && healthErr != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
 		return
 	}
 
@@ -393,26 +424,42 @@ func (h *NotificationHandler) BatchUpdateSettings(c *gin.Context) {
 	}
 
 	// 查询所有探测任务
-	var tasks []model.ProbeTask
-	if err := h.db.Find(&tasks).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务列表失败"})
+	var probeTasks []model.ProbeTask
+	if err := h.db.Find(&probeTasks).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询探测任务列表失败"})
 		return
 	}
 
-	if len(tasks) == 0 {
-		c.JSON(http.StatusOK, gin.H{"message": "没有探测任务需要更新"})
+	// 查询所有健康监控任务
+	var healthTasks []model.HealthMonitorTask
+	if err := h.db.Find(&healthTasks).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询健康监控任务列表失败"})
+		return
+	}
+
+	// 收集所有任务ID
+	allTaskIDs := make([]uint, 0, len(probeTasks)+len(healthTasks))
+	for _, task := range probeTasks {
+		allTaskIDs = append(allTaskIDs, task.ID)
+	}
+	for _, task := range healthTasks {
+		allTaskIDs = append(allTaskIDs, task.ID)
+	}
+
+	if len(allTaskIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "没有任务需要更新"})
 		return
 	}
 
 	// 在事务中批量更新
 	err := h.db.Transaction(func(tx *gorm.DB) error {
-		for _, task := range tasks {
+		for _, taskID := range allTaskIDs {
 			var setting model.NotificationSetting
-			if err := tx.Where("task_id = ?", task.ID).First(&setting).Error; err != nil {
+			if err := tx.Where("task_id = ?", taskID).First(&setting).Error; err != nil {
 				if err == gorm.ErrRecordNotFound {
 					// 创建新设置
 					setting = model.NotificationSetting{
-						TaskID:           task.ID,
+						TaskID:           taskID,
 						NotifyFailover:   req.EnableAll,
 						NotifyRecovery:   req.EnableAll,
 						NotifyConsecFail: req.EnableAll,
@@ -503,14 +550,26 @@ func (h *NotificationHandler) GetNotificationLogs(c *gin.Context) {
 	// 查询任务名称映射
 	taskNameMap := make(map[uint]string)
 	if len(taskIDs) > 0 {
-		var tasks []model.ProbeTask
-		if err := h.db.Where("id IN ?", taskIDs).Find(&tasks).Error; err == nil {
-			for _, task := range tasks {
+		// 查询探测任务名称
+		var probeTasks []model.ProbeTask
+		if err := h.db.Where("id IN ?", taskIDs).Find(&probeTasks).Error; err == nil {
+			for _, task := range probeTasks {
 				taskName := task.Domain
 				if task.SubDomain != "" && task.SubDomain != "@" {
 					taskName = task.SubDomain + "." + task.Domain
 				}
 				taskNameMap[task.ID] = taskName
+			}
+		}
+		// 查询健康监控任务名称
+		var healthTasks []model.HealthMonitorTask
+		if err := h.db.Where("id IN ?", taskIDs).Find(&healthTasks).Error; err == nil {
+			for _, task := range healthTasks {
+				taskName := task.Domain
+				if task.SubDomain != "" && task.SubDomain != "@" {
+					taskName = task.SubDomain + "." + task.Domain
+				}
+				taskNameMap[task.ID] = "[监控] " + taskName
 			}
 		}
 	}

@@ -19,6 +19,22 @@ func SetupRouter(
 	fixedJWTSecret bool,
 	startTime ...time.Time,
 ) *gin.Engine {
+	return SetupRouterWithHealthMonitor(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, nil, jwtSecret, fixedJWTSecret, startTime...)
+}
+
+// SetupRouterWithHealthMonitor 配置并返回 Gin 路由引擎（包含健康监控路由）
+func SetupRouterWithHealthMonitor(
+	authHandler *AuthHandler,
+	credHandler *CredentialHandler,
+	taskHandler *TaskHandler,
+	statusHandler *StatusHandler,
+	poolHandler *PoolHandler,
+	notifHandler *NotificationHandler,
+	healthMonitorHandler *HealthMonitorHandler,
+	jwtSecret []byte,
+	fixedJWTSecret bool,
+	startTime ...time.Time,
+) *gin.Engine {
 	r := gin.Default()
 
 	// API 路由组
@@ -121,6 +137,21 @@ func SetupRouter(
 
 					// 通知记录
 					notification.GET("/logs", notifHandler.GetNotificationLogs)
+				}
+			}
+
+			// 健康监控任务管理
+			if healthMonitorHandler != nil {
+				hm := authorized.Group("/health-monitors")
+				{
+					hm.POST("", healthMonitorHandler.CreateHealthMonitor)
+					hm.GET("", healthMonitorHandler.ListHealthMonitors)
+					hm.GET("/:id", healthMonitorHandler.GetHealthMonitor)
+					hm.PUT("/:id", healthMonitorHandler.UpdateHealthMonitor)
+					hm.POST("/:id/pause", healthMonitorHandler.PauseHealthMonitor)
+					hm.POST("/:id/resume", healthMonitorHandler.ResumeHealthMonitor)
+					hm.DELETE("/:id", healthMonitorHandler.DeleteHealthMonitor)
+					hm.GET("/:id/results", healthMonitorHandler.GetHealthMonitorResults)
 				}
 			}
 		}

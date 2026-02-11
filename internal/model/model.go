@@ -328,3 +328,64 @@ type NotificationLog struct {
 	Detail      string    // 事件详情摘要
 	SentAt      time.Time `gorm:"index;not null"` // 发送时间
 }
+
+// ========== 健康监控模块相关模型 ==========
+
+// HealthMonitorTask 健康监控任务
+// 独立于探测任务(ProbeTask)，仅用于监控DNS解析的健康状态，不执行故障转移操作
+// 凭证为可选项：不选择凭证时，系统直接通过DNS解析域名获取IP进行探测
+type HealthMonitorTask struct {
+	ID           uint   `gorm:"primaryKey"`
+	CredentialID *uint  // 云服务商凭证ID（可选，为空时直接DNS解析）
+	Domain       string `gorm:"not null"` // 主域名
+	SubDomain    string `gorm:"not null"` // 子域名
+	RecordType   string `gorm:"not null"` // 记录类型: A/AAAA/A_AAAA/CNAME
+
+	// 探测配置
+	ProbeProtocol    string `gorm:"not null"` // 探测协议: ICMP/TCP/UDP/HTTP/HTTPS
+	ProbePort        int    // 探测端口
+	ProbeIntervalSec int    `gorm:"not null"` // 探测间隔(秒)
+	TimeoutMs        int    `gorm:"not null"` // 超时时间(毫秒)
+	FailThreshold    int    `gorm:"not null"` // 失败阈值
+	RecoverThreshold int    `gorm:"not null"` // 恢复阈值
+
+	// CNAME专用字段
+	FailThresholdType  string `gorm:"default:'count'"` // 阈值类型: count/percent
+	FailThresholdValue int    `gorm:"default:1"`       // 阈值数值
+
+	// 状态
+	Enabled   bool `gorm:"not null;default:true"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// HealthMonitorTarget 健康监控目标IP
+// 记录每个被监控的IP地址及其健康状态
+type HealthMonitorTarget struct {
+	ID         uint   `gorm:"primaryKey"`
+	TaskID     uint   `gorm:"index;not null"` // 所属任务ID
+	CNAMEValue string `gorm:"default:''"`     // CNAME记录值(仅CNAME类型)
+	IP         string `gorm:"not null"`       // IP地址
+
+	// 健康状态
+	HealthStatus         string     `gorm:"not null;default:'unknown'"` // healthy/unhealthy/unknown
+	ConsecutiveFails     int        `gorm:"default:0"`                  // 连续失败次数
+	ConsecutiveSuccesses int        `gorm:"default:0"`                  // 连续成功次数
+	AvgLatencyMs         int        `gorm:"default:0"`                  // 平均延迟(最近10次成功探测)
+	LastProbeAt          *time.Time // 最后探测时间
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// HealthMonitorResult 健康监控探测结果
+// 记录每次对监控目标IP的探测结果
+type HealthMonitorResult struct {
+	ID        uint      `gorm:"primaryKey"`
+	TaskID    uint      `gorm:"index;not null"` // 任务ID
+	IP        string    `gorm:"not null"`       // IP地址
+	Success   bool      `gorm:"not null"`       // 是否成功
+	LatencyMs int       // 延迟(毫秒)
+	ErrorMsg  string    // 错误信息
+	ProbedAt  time.Time `gorm:"index"` // 探测时间
+}

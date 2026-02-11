@@ -93,6 +93,31 @@ const routes = [
     name: 'SystemLogs',
     component: () => import('./views/NotificationLog.vue'),
     meta: { requiresAuth: true }
+  },
+  // 健康监控相关路由
+  {
+    path: '/health-monitors',
+    name: 'HealthMonitorList',
+    component: () => import('./views/HealthMonitorList.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/health-monitors/new',
+    name: 'HealthMonitorCreate',
+    component: () => import('./views/HealthMonitorForm.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/health-monitors/:id/edit',
+    name: 'HealthMonitorEdit',
+    component: () => import('./views/HealthMonitorForm.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/health-monitors/:id',
+    name: 'HealthMonitorDetail',
+    component: () => import('./views/HealthMonitorDetail.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 

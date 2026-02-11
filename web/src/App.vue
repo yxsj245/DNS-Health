@@ -32,6 +32,10 @@
           <el-icon><List /></el-icon>
           <span>探测任务</span>
         </el-menu-item>
+        <el-menu-item index="/health-monitors">
+          <el-icon><Odometer /></el-icon>
+          <span>健康监控</span>
+        </el-menu-item>
         <el-menu-item index="/pools">
           <el-icon><Collection /></el-icon>
           <span>解析池</span>
@@ -109,7 +113,7 @@
 import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Monitor, List, Key, UserFilled, Collection, Bell, Document, Coffee } from '@element-plus/icons-vue'
+import { Monitor, List, Key, UserFilled, Collection, Bell, Document, Coffee, Odometer } from '@element-plus/icons-vue'
 import api from './api'
 
 // ==================== 路由 ====================
@@ -199,6 +203,10 @@ const activeMenu = computed(() => {
   // 解析池相关路径统一高亮"解析池"菜单
   if (path.startsWith('/pools')) {
     return '/pools'
+  }
+  // 健康监控相关路径统一高亮"健康监控"菜单
+  if (path.startsWith('/health-monitors')) {
+    return '/health-monitors'
   }
   if (path.startsWith('/credentials')) {
     return '/credentials'

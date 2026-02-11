@@ -21,6 +21,7 @@ import (
 	"dns-health-monitor/internal/database"
 	"dns-health-monitor/internal/failover"
 	"dns-health-monitor/internal/model"
+	"dns-health-monitor/internal/monitor"
 	"dns-health-monitor/internal/notification"
 	"dns-health-monitor/internal/pool"
 	"dns-health-monitor/internal/provider"
@@ -247,6 +248,17 @@ func main() {
 	}
 	log.Println("调度器已启动")
 
+	// 6.1 创建并启动健康监控调度器
+	monitorExecutor := monitor.NewMonitorExecutor(db, notifManager)
+	// 注入DNS服务商工厂函数，有凭证的任务将通过云服务商API查询解析记录
+	monitorExecutor.SetProviderFactory(monitor.ProviderFactory(providerFactory))
+	monitorSched := monitor.NewMonitorScheduler(db, monitorExecutor)
+	if err := monitorSched.Start(ctx); err != nil {
+		log.Printf("启动健康监控调度器失败: %v", err)
+	} else {
+		log.Println("健康监控调度器已启动")
+	}
+
 	// 7. 生成或使用指定的 JWT 签名密钥
 	var jwtSecret []byte
 	if *jwtSecretFlag != "" {
@@ -290,7 +302,12 @@ func main() {
 	// 8. 设置 Gin 模式并创建路由
 	gin.SetMode(cfg.Server.Mode)
 	useFixedSecret := *jwtSecretFlag != ""
-	router := api.SetupRouter(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, jwtSecret, useFixedSecret, startTime)
+
+	// 创建健康监控API处理器
+	monitorManager := monitor.NewHealthMonitorManager(db)
+	healthMonitorHandler := api.NewHealthMonitorHandler(monitorManager, monitorSched, db)
+
+	router := api.SetupRouterWithHealthMonitor(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, healthMonitorHandler, jwtSecret, useFixedSecret, startTime)
 
 	// 9. 嵌入前端静态文件服务
 	// 如果 web/dist 目录存在，提供静态文件服务
@@ -336,6 +353,10 @@ func main() {
 	// 停止调度器
 	sched.Stop()
 	log.Println("调度器已停止")
+
+	// 停止健康监控调度器
+	monitorSched.Stop()
+	log.Println("健康监控调度器已停止")
 
 	// 停止解析池探测调度器
 	poolProber.Stop()

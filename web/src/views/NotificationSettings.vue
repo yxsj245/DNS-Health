@@ -75,11 +75,11 @@
       </el-form>
     </el-card>
 
-    <!-- 任务通知设置区域 -->
+    <!-- 探测任务通知设置 -->
     <el-card class="settings-card" shadow="never">
       <template #header>
         <div class="card-header">
-          <span class="card-title">任务通知设置</span>
+          <span class="card-title">探测任务通知设置</span>
           <div class="card-actions">
             <el-button type="primary" size="small" :loading="batchLoading" @click="handleBatchEnable">
               全部启用
@@ -92,7 +92,7 @@
       </template>
 
       <el-table
-        :data="notificationSettings"
+        :data="probeSettings"
         v-loading="settingsLoading"
         border
         stripe
@@ -102,26 +102,67 @@
         <el-table-column prop="task_name" label="任务名称" min-width="200" />
         <el-table-column label="故障转移" min-width="120" align="center">
           <template #default="{ row }">
-            <el-switch
-              v-model="row.notify_failover"
-              @change="handleSettingChange(row)"
-            />
+            <el-switch v-model="row.notify_failover" @change="handleSettingChange(row)" />
           </template>
         </el-table-column>
         <el-table-column label="恢复" min-width="120" align="center">
           <template #default="{ row }">
-            <el-switch
-              v-model="row.notify_recovery"
-              @change="handleSettingChange(row)"
-            />
+            <el-switch v-model="row.notify_recovery" @change="handleSettingChange(row)" />
           </template>
         </el-table-column>
         <el-table-column label="连续失败" min-width="120" align="center">
           <template #default="{ row }">
-            <el-switch
-              v-model="row.notify_consec_fail"
-              @change="handleSettingChange(row)"
-            />
+            <el-switch v-model="row.notify_consec_fail" @change="handleSettingChange(row)" />
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <!-- 健康监控任务通知设置 -->
+    <el-card class="settings-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">健康监控任务通知设置</span>
+        </div>
+      </template>
+
+      <el-table
+        :data="healthMonitorSettings"
+        v-loading="settingsLoading"
+        border
+        stripe
+        style="width: 100%"
+        empty-text="暂无健康监控任务"
+      >
+        <el-table-column prop="task_name" label="任务名称" min-width="200" />
+        <el-table-column label="状态变更" min-width="120" align="center">
+          <template #header>
+            <el-tooltip content="IP状态从健康变为不健康时通知" placement="top">
+              <span>状态变更</span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <el-switch v-model="row.notify_failover" @change="handleSettingChange(row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="状态恢复" min-width="120" align="center">
+          <template #header>
+            <el-tooltip content="IP状态从不健康恢复为健康时通知" placement="top">
+              <span>状态恢复</span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <el-switch v-model="row.notify_recovery" @change="handleSettingChange(row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="连续失败" min-width="120" align="center">
+          <template #header>
+            <el-tooltip content="IP连续探测失败达到阈值时通知" placement="top">
+              <span>连续失败</span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <el-switch v-model="row.notify_consec_fail" @change="handleSettingChange(row)" />
           </template>
         </el-table-column>
       </el-table>
@@ -130,7 +171,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api'
 
@@ -164,8 +205,20 @@ const smtpForm = reactive({
   to_address: ''
 })
 
-// 任务通知设置列表
+// 任务通知设置列表（原始数据）
 const notificationSettings = ref([])
+
+// ==================== 计算属性 ====================
+
+/** 探测任务通知设置 */
+const probeSettings = computed(() =>
+  notificationSettings.value.filter(s => s.task_type === 'probe')
+)
+
+/** 健康监控任务通知设置 */
+const healthMonitorSettings = computed(() =>
+  notificationSettings.value.filter(s => s.task_type === 'health_monitor')
+)
 
 // ==================== 表单验证规则 ====================
 
