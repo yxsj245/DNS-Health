@@ -102,11 +102,20 @@ func (e *failoverExecutorImpl) SwitchToBackup(ctx context.Context, task *model.P
 	}
 
 	// 获取当前DNS记录，用于确定recordID
-	records, err := prov.ListRecords(ctx, task.Domain, task.SubDomain, task.RecordType)
-	if err != nil {
-		e.saveOperationLog(task.ID, "switch_to_backup", "", backupValue, task.RecordType, false,
-			fmt.Sprintf("获取DNS记录失败: %v", err))
-		return fmt.Errorf("获取DNS记录失败: %w", err)
+	// A_AAAA 类型需要同时获取 A 和 AAAA 记录
+	var records []provider.DNSRecord
+	if model.RecordType(task.RecordType) == model.RecordTypeA_AAAA {
+		aRecords, _ := prov.ListRecords(ctx, task.Domain, task.SubDomain, "A")
+		aaaaRecords, _ := prov.ListRecords(ctx, task.Domain, task.SubDomain, "AAAA")
+		records = append(aRecords, aaaaRecords...)
+	} else {
+		var err error
+		records, err = prov.ListRecords(ctx, task.Domain, task.SubDomain, task.RecordType)
+		if err != nil {
+			e.saveOperationLog(task.ID, "switch_to_backup", "", backupValue, task.RecordType, false,
+				fmt.Sprintf("获取DNS记录失败: %v", err))
+			return fmt.Errorf("获取DNS记录失败: %w", err)
+		}
 	}
 
 	if len(records) == 0 {
@@ -181,11 +190,20 @@ func (e *failoverExecutorImpl) SwitchBack(ctx context.Context, task *model.Probe
 	}
 
 	// 获取当前DNS记录，用于确定recordID
-	records, err := prov.ListRecords(ctx, task.Domain, task.SubDomain, task.RecordType)
-	if err != nil {
-		e.saveOperationLog(task.ID, "switch_back", "", task.OriginalValue, task.RecordType, false,
-			fmt.Sprintf("获取DNS记录失败: %v", err))
-		return fmt.Errorf("获取DNS记录失败: %w", err)
+	// A_AAAA 类型需要同时获取 A 和 AAAA 记录
+	var records []provider.DNSRecord
+	if model.RecordType(task.RecordType) == model.RecordTypeA_AAAA {
+		aRecords, _ := prov.ListRecords(ctx, task.Domain, task.SubDomain, "A")
+		aaaaRecords, _ := prov.ListRecords(ctx, task.Domain, task.SubDomain, "AAAA")
+		records = append(aRecords, aaaaRecords...)
+	} else {
+		var err error
+		records, err = prov.ListRecords(ctx, task.Domain, task.SubDomain, task.RecordType)
+		if err != nil {
+			e.saveOperationLog(task.ID, "switch_back", "", task.OriginalValue, task.RecordType, false,
+				fmt.Sprintf("获取DNS记录失败: %v", err))
+			return fmt.Errorf("获取DNS记录失败: %w", err)
+		}
 	}
 
 	if len(records) == 0 {

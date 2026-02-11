@@ -421,7 +421,7 @@ func (s *Scheduler) executeSwitchProbe(ctx context.Context, runner *taskRunner, 
 	switch model.RecordType(task.RecordType) {
 	case model.RecordTypeCNAME:
 		s.executeCNAMESwitchProbe(ctx, runner, prov)
-	case model.RecordTypeA, model.RecordTypeAAAA:
+	case model.RecordTypeA, model.RecordTypeAAAA, model.RecordTypeA_AAAA:
 		s.executeDirectSwitchProbe(ctx, runner, prov)
 	default:
 		log.Printf("任务 %d: 不支持的解析记录类型 %s", task.ID, task.RecordType)
@@ -537,12 +537,34 @@ func (s *Scheduler) executeDirectSwitchProbe(ctx context.Context, runner *taskRu
 	task := runner.task
 
 	// 1. 获取当前DNS记录，确定要探测的IP（带重试）
-	records, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
-		return prov.ListRecords(ctx, task.Domain, task.SubDomain, task.RecordType)
-	})
-	if err != nil {
-		log.Printf("任务 %d: 获取 %s 记录失败（已重试）: %v", task.ID, task.RecordType, err)
-		return
+	// A_AAAA 类型需要同时获取 A 和 AAAA 记录
+	var records []provider.DNSRecord
+	if model.RecordType(task.RecordType) == model.RecordTypeA_AAAA {
+		aRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+			return prov.ListRecords(ctx, task.Domain, task.SubDomain, "A")
+		})
+		if err != nil {
+			log.Printf("任务 %d: 获取 A 记录失败（已重试）: %v", task.ID, err)
+		} else {
+			records = append(records, aRecords...)
+		}
+		aaaaRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+			return prov.ListRecords(ctx, task.Domain, task.SubDomain, "AAAA")
+		})
+		if err != nil {
+			log.Printf("任务 %d: 获取 AAAA 记录失败（已重试）: %v", task.ID, err)
+		} else {
+			records = append(records, aaaaRecords...)
+		}
+	} else {
+		var err error
+		records, err = retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+			return prov.ListRecords(ctx, task.Domain, task.SubDomain, task.RecordType)
+		})
+		if err != nil {
+			log.Printf("任务 %d: 获取 %s 记录失败（已重试）: %v", task.ID, task.RecordType, err)
+			return
+		}
 	}
 
 	if len(records) == 0 {

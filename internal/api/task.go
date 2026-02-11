@@ -128,7 +128,7 @@ func applyTaskRequestDefaults(req *CreateTaskRequest) {
 		req.TaskType = string(model.TaskTypePauseDelete)
 	}
 	if req.RecordType == "" {
-		req.RecordType = string(model.RecordTypeA)
+		req.RecordType = string(model.RecordTypeA_AAAA)
 	}
 	if req.SwitchBackPolicy == "" {
 		req.SwitchBackPolicy = string(model.SwitchBackAuto)
@@ -199,7 +199,7 @@ func validateTaskRequest(req *CreateTaskRequest, db *gorm.DB, pm pool.PoolManage
 
 	// 验证解析记录类型
 	if !model.IsValidRecordType(req.RecordType) {
-		return "解析记录类型无效，必须是 A、AAAA 或 CNAME"
+		return "解析记录类型无效，必须是 A、AAAA、A_AAAA 或 CNAME"
 	}
 
 	// 验证回切策略
@@ -241,7 +241,7 @@ func validateTaskRequest(req *CreateTaskRequest, db *gorm.DB, pm pool.PoolManage
 		}
 
 		// 验证池资源类型与解析记录类型匹配
-		// A/AAAA 记录需要 ip 类型的池，CNAME 记录需要 domain 类型的池
+		// A/AAAA/A_AAAA 记录需要 ip 类型的池，CNAME 记录需要 domain 类型的池
 		expectedResourceType := "ip"
 		if req.RecordType == string(model.RecordTypeCNAME) {
 			expectedResourceType = "domain"

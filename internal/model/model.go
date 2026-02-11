@@ -23,6 +23,8 @@ const (
 	RecordTypeA RecordType = "A"
 	// RecordTypeAAAA AAAA记录
 	RecordTypeAAAA RecordType = "AAAA"
+	// RecordTypeA_AAAA A和AAAA记录（同时监控）
+	RecordTypeA_AAAA RecordType = "A_AAAA"
 	// RecordTypeCNAME CNAME记录
 	RecordTypeCNAME RecordType = "CNAME"
 )
@@ -72,7 +74,7 @@ func IsValidTaskType(t string) bool {
 // IsValidRecordType 验证解析记录类型是否有效
 func IsValidRecordType(t string) bool {
 	switch RecordType(t) {
-	case RecordTypeA, RecordTypeAAAA, RecordTypeCNAME:
+	case RecordTypeA, RecordTypeAAAA, RecordTypeA_AAAA, RecordTypeCNAME:
 		return true
 	default:
 		return false
@@ -131,7 +133,7 @@ type ProbeTask struct {
 
 	// 新增字段 - 任务类型和策略
 	TaskType         string `gorm:"not null;default:'pause_delete'"` // 任务类型: pause_delete / switch
-	RecordType       string `gorm:"not null;default:'A'"`            // 解析记录类型: A / AAAA / CNAME
+	RecordType       string `gorm:"not null;default:'A_AAAA'"`       // 解析记录类型: A / AAAA / A_AAAA / CNAME
 	PoolID           *uint  `gorm:"index"`                           // 关联的解析池ID（可选，切换类型任务必填）
 	SwitchBackPolicy string `gorm:"default:'auto'"`                  // 回切策略: auto / manual
 

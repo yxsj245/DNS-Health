@@ -660,6 +660,10 @@ const fetchTask = async () => {
     // 回填新增字段
     form.task_type = task.task_type || 'pause_delete'
     form.record_type = task.record_type || 'A_AAAA'
+    // 兼容旧数据：将单独的 A 或 AAAA 映射为 A_AAAA
+    if (form.record_type === 'A' || form.record_type === 'AAAA') {
+      form.record_type = 'A_AAAA'
+    }
     form.pool_id = task.pool_id || null
     form.switch_back_policy = task.switch_back_policy || 'auto'
     form.fail_threshold_type = task.fail_threshold_type || 'count'
