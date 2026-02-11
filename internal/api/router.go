@@ -97,6 +97,7 @@ func SetupRouterWithHealthMonitor(
 			authorized.POST("/tasks/:id/ips/exclude", statusHandler.ExcludeIP)
 			authorized.POST("/tasks/:id/ips/include", statusHandler.IncludeIP)
 			authorized.GET("/tasks/:id/cname", statusHandler.GetCNAMEInfo)
+			authorized.GET("/tasks/:id/latency", statusHandler.GetTaskLatency) // 延迟数据查询
 
 			// 全局操作日志查询（支持按任务ID、操作类型、时间范围筛选）
 			// 验证需求：10.3
@@ -152,6 +153,7 @@ func SetupRouterWithHealthMonitor(
 					hm.POST("/:id/resume", healthMonitorHandler.ResumeHealthMonitor)
 					hm.DELETE("/:id", healthMonitorHandler.DeleteHealthMonitor)
 					hm.GET("/:id/results", healthMonitorHandler.GetHealthMonitorResults)
+					hm.GET("/:id/latency", healthMonitorHandler.GetHealthMonitorLatency) // 延迟数据查询
 				}
 			}
 		}

@@ -9,6 +9,13 @@
       <el-button @click="goBack">返回列表</el-button>
     </div>
 
+    <!-- 延迟曲线图表：显示在基本信息卡片上方 -->
+    <LatencyChart
+      :apiUrl="`/health-monitors/${taskId}`"
+      :ipList="latencyIpList"
+      :probeIntervalSec="task.probe_interval_sec"
+    />
+
     <!-- 任务基本信息卡片 -->
     <el-card class="info-card" shadow="never" v-loading="taskLoading">
       <template #header>
@@ -192,6 +199,7 @@ import { ref, reactive, onMounted, computed, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api'
+import LatencyChart from '../components/LatencyChart.vue'
 
 // ==================== 路由 ====================
 
@@ -301,6 +309,14 @@ const successRateColor = computed(() => {
   if (rate >= 90) return '#67c23a'
   if (rate >= 70) return '#e6a23c'
   return '#f56c6c'
+})
+
+/**
+ * 从监控目标列表中提取 IP 列表，用于延迟曲线图表
+ */
+const latencyIpList = computed(() => {
+  if (!task.targets || task.targets.length === 0) return []
+  return task.targets.map(t => t.ip).filter(Boolean)
 })
 
 // ==================== 辅助函数 ====================

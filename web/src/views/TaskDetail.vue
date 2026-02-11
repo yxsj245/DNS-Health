@@ -9,6 +9,13 @@
       <el-button @click="goBack">返回列表</el-button>
     </div>
 
+    <!-- 延迟曲线图表：显示在基本信息卡片上方 -->
+    <LatencyChart
+      :apiUrl="`/tasks/${taskId}`"
+      :ipList="latencyIpList"
+      :probeIntervalSec="task.probe_interval_sec"
+    />
+
     <!-- 任务基本信息 -->
     <el-card class="info-card" shadow="never" v-loading="taskLoading">
       <template #header>
@@ -359,6 +366,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link } from '@element-plus/icons-vue'
 import api from '../api'
+import LatencyChart from '../components/LatencyChart.vue'
 
 // ==================== 路由 ====================
 
@@ -420,6 +428,9 @@ const logsEndTime = ref(null)
 // IP 管理相关状态
 const ipsData = ref([])
 const ipsLoading = ref(false)
+
+// 延迟图表 IP 列表
+const latencyIpList = ref([])
 
 // CNAME 信息相关状态
 const cnameLoading = ref(false)
@@ -558,6 +569,20 @@ const fetchLogs = async () => {
 }
 
 /**
+ * 获取延迟图表所需的 IP 列表
+ * 调用 GET /api/tasks/:id/ips，提取 IP 字符串数组
+ */
+const fetchLatencyIpList = async () => {
+  try {
+    const response = await api.get(`/tasks/${taskId}/ips`)
+    const data = response.data || []
+    latencyIpList.value = data.map(item => item.ip).filter(Boolean)
+  } catch (error) {
+    console.error('获取延迟图表 IP 列表失败', error)
+  }
+}
+
+/**
  * 获取任务关联的所有 IP 及其探测状态
  * 调用 GET /api/tasks/:id/ips
  */
@@ -654,9 +679,10 @@ const handleTabChange = (tabName) => {
 
 // ==================== 生命周期 ====================
 
-// 页面加载时获取任务信息和探测历史
+// 页面加载时获取任务信息、延迟图表 IP 列表和探测历史
 onMounted(() => {
   fetchTask()
+  fetchLatencyIpList()
   fetchHistory()
 })
 </script>

@@ -9,6 +9,7 @@ import (
 	"dns-health-monitor/internal/prober"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -707,4 +708,82 @@ func (h *HealthMonitorHandler) GetHealthMonitorResults(c *gin.Context) {
 			"items": items,
 		},
 	})
+}
+
+// GetHealthMonitorLatency 获取健康监控任务的延迟数据
+// GET /api/health-monitors/:id/latency?ip=xxx&start_time=xxx&end_time=xxx
+// 按 probed_at 升序返回指定任务、IP、时间范围内的延迟数据
+// 验证需求：1.2, 1.3, 1.4, 1.5, 1.6
+func (h *HealthMonitorHandler) GetHealthMonitorLatency(c *gin.Context) {
+	// 解析任务 ID
+	idStr := c.Param("id")
+	taskID, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的任务 ID"})
+		return
+	}
+
+	// 验证 ip 参数（必填）
+	ip := c.Query("ip")
+	if ip == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少必填参数: ip"})
+		return
+	}
+
+	// 验证任务是否存在
+	task, err := h.Manager.GetTask(uint(taskID))
+	if err != nil || task == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		return
+	}
+
+	// 解析时间范围，默认最近 24 小时
+	now := time.Now()
+	startTime := now.Add(-24 * time.Hour)
+	endTime := now
+
+	if st := c.Query("start_time"); st != "" {
+		if t, err := time.Parse(time.RFC3339Nano, st); err == nil {
+			startTime = t
+		} else if t, err := time.Parse(time.RFC3339, st); err == nil {
+			startTime = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", st); err == nil {
+			startTime = t
+		}
+	}
+	if et := c.Query("end_time"); et != "" {
+		if t, err := time.Parse(time.RFC3339Nano, et); err == nil {
+			endTime = t
+		} else if t, err := time.Parse(time.RFC3339, et); err == nil {
+			endTime = t
+		} else if t, err := time.Parse("2006-01-02 15:04:05", et); err == nil {
+			endTime = t
+		}
+	}
+
+	// 查询延迟数据，按 probed_at 升序
+	// 将时间统一转为本地时间，确保与数据库中存储的时区一致
+	startTime = startTime.Local()
+	endTime = endTime.Local()
+
+	var results []model.HealthMonitorResult
+	if err := h.DB.Where("task_id = ? AND ip = ? AND probed_at BETWEEN ? AND ?",
+		taskID, ip, startTime, endTime).
+		Order("probed_at ASC").
+		Find(&results).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询延迟数据失败"})
+		return
+	}
+
+	// 构建响应，复用 LatencyDataPoint 结构体（定义在 status.go 中）
+	data := make([]LatencyDataPoint, 0, len(results))
+	for _, r := range results {
+		data = append(data, LatencyDataPoint{
+			LatencyMs: r.LatencyMs,
+			ProbedAt:  r.ProbedAt.Format("2006-01-02 15:04:05"),
+			Success:   r.Success,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": data})
 }
