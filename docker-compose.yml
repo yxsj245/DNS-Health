@@ -1,0 +1,15 @@
+services:
+  dns-health-monitor:
+    build: .
+    container_name: dns-health-monitor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 持久化数据库和加密密钥
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    # ICMP 探测需要 NET_RAW 权限
+    cap_add:
+      - NET_RAW

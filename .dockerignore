@@ -1,0 +1,22 @@
+# 依赖和构建产物
+web/node_modules/
+web/dist/
+tmp/
+data/
+*.exe
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.kiro/
+
+# 文档
+*.md
+docs/
+
+# 开发脚本
+*.bat
+.air.toml

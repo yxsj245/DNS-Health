@@ -1,0 +1,31 @@
+# Air 热重载配置 - https://github.com/air-verse/air
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # 编译命令
+  cmd = "go build -o ./tmp/dns-health-monitor.exe ."
+  # 运行的二进制文件
+  bin = "tmp/dns-health-monitor.exe"
+  # 监听文件变化的延迟（毫秒）
+  delay = 1000
+  # 监听这些目录
+  include_dir = ["internal", "."]
+  # 排除这些目录
+  exclude_dir = ["web", "tmp", "data", "docs", ".git", ".kiro", ".vscode"]
+  # 监听这些后缀的文件
+  include_ext = ["go", "yaml"]
+  # 排除这些文件
+  exclude_file = []
+  # 编译失败时停止旧的二进制
+  stop_on_error = true
+  # 发送中断信号后等待的时间（秒）
+  kill_delay = 1
+
+[log]
+  # 显示日志时间
+  time = true
+
+[misc]
+  # 退出时清理临时目录
+  clean_on_exit = true
