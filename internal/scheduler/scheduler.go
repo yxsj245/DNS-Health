@@ -575,8 +575,10 @@ func (s *Scheduler) executeCNAMEPauseDeleteProbe(ctx context.Context, runner *ta
 			task.ID, cnameValue, failedCount, totalIPs, threshold)
 
 		// 2.6 根据失败数量和阈值决定操作（只针对这一条CNAME记录）
-		if failedCount >= threshold && threshold > 0 && info.isOnline {
-			// 失败达到阈值且记录在线 -> 暂停/删除这条CNAME记录
+		// 注意：已暂停(paused/DISABLE)的记录不应重复触发暂停操作，等待恢复即可
+		isPaused := info.status == "paused" || info.status == "DISABLE"
+		if failedCount >= threshold && threshold > 0 && info.isOnline && !isPaused {
+			// 失败达到阈值且记录在线且未暂停 -> 暂停/删除这条CNAME记录
 			s.pauseOrDeleteCNAMERecord(ctx, runner, prov, cnameValue, info.recordID, info.ttl, failedCount, totalIPs, threshold)
 		} else if (failedCount < threshold || threshold == 0) && !info.isOnline {
 			// 恢复健康且记录已被删除 -> 重新添加这条CNAME记录
