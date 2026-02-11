@@ -92,6 +92,9 @@ jobs:
           npm ci
           npm run build
 
+      - name: 同步依赖
+        run: go mod tidy
+
       - name: 设置 Go
         uses: actions/setup-go@v5
         with:
@@ -102,9 +105,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
-
-      - name: 同步依赖
-        run: go mod tidy
 
       - name: 编译二进制文件
         env:
