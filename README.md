@@ -1,6 +1,8 @@
 # DNS 健康监控与自动故障转移系统
 
 一个智能的 DNS 解析健康监控系统，通过周期性探测自动管理 DNS 记录，确保域名始终指向健康的服务器资源。
+<img width="2395" height="1252" alt="image" src="https://github.com/user-attachments/assets/a255f12c-79e8-4c52-820d-2694e1cafb9c" />
+
 
 ## 核心功能
 
