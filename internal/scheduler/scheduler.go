@@ -319,6 +319,9 @@ func (s *Scheduler) executeProbe(ctx context.Context, runner *taskRunner, prov p
 	case model.TaskTypeSwitch:
 		// 切换类型任务：使用故障转移逻辑
 		s.executeSwitchProbe(ctx, runner, prov)
+	case model.TaskTypeCDNSwitch:
+		// CDN故障转移类型任务：通过Cloudflare proxied字段控制CDN代理开关
+		s.executeCDNSwitchProbe(ctx, runner, prov)
 	default:
 		// 暂停/删除类型任务（包括空值和pause_delete）：使用现有逻辑
 		s.executePauseDeleteProbe(ctx, runner, prov)
@@ -686,6 +689,371 @@ func (s *Scheduler) resumeCNAMERecord(ctx context.Context, runner *taskRunner, p
 			})
 		}
 	}
+}
+
+// executeCDNSwitchProbe 执行CDN故障转移类型任务的探测
+// 流程：
+// 1. 通过类型断言检查provider是否实现了ProxiedController接口
+// 2. 解析探测CNAME域名获取IP列表
+// 3. 对解析出的IP进行健康探测
+// 4. 按阈值（百分比/个数）判断失败是否达标
+// 5. 连续达标轮次达到失败阈值 → 启用CDN代理并切换记录值
+// 6. 已切换且恢复健康 → 根据回切策略关闭CDN代理并恢复原始记录值
+// 验证需求：4.3, 4.4, 4.5, 4.6, 4.8, 6.5, 6.6
+func (s *Scheduler) executeCDNSwitchProbe(ctx context.Context, runner *taskRunner, prov provider.DNSProvider) {
+	task := runner.task
+
+	// 1. 通过类型断言检查provider是否实现了ProxiedController接口
+	pc, ok := prov.(provider.ProxiedController)
+	if !ok {
+		log.Printf("任务 %d: CDN故障转移需要ProxiedController接口支持，当前服务商不支持", task.ID)
+		return
+	}
+
+	// 2. 从 DNS API 获取当前域名的解析记录，确定探测目标 IP
+	// 已切换状态下，如果原始记录是 CNAME，当前实际是 A 记录（故障转移时转换的）
+	// 此时需要探测原始 CNAME 指向的 IP 来判断源站是否恢复
+	var record *provider.DNSRecord
+	var recordType string
+	var ips []string
+	var err error
+
+	if task.IsSwitched && task.OriginalRecordType == "CNAME" && task.OriginalValue != "" {
+		// 已切换且原始是 CNAME：探测原始 CNAME 域名解析出的 IP
+		if s.cnameResolver == nil {
+			log.Printf("任务 %d: CNAME记录需要CNAME解析器支持", task.ID)
+			return
+		}
+		ips, err = s.cnameResolver.ResolveIPs(ctx, task.OriginalValue)
+		if err != nil {
+			log.Printf("任务 %d: 解析原始CNAME %s 失败: %v", task.ID, task.OriginalValue, err)
+			return
+		}
+		// 回切时需要用到当前 A 记录，提前获取
+		records, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+			return prov.ListRecords(ctx, task.Domain, task.SubDomain, "A")
+		})
+		if err != nil || len(records) == 0 {
+			log.Printf("任务 %d: 获取当前A记录失败（已切换状态）: %v", task.ID, err)
+			return
+		}
+		record = &records[0]
+		recordType = "A"
+	} else {
+		// 正常状态或非 CNAME 原始记录：按任务配置的记录类型查找
+		record, recordType, err = s.findCDNRecord(ctx, prov, task)
+		if err != nil || record == nil {
+			log.Printf("任务 %d: 获取当前DNS记录失败: %v", task.ID, err)
+			return
+		}
+
+		if recordType == "CNAME" {
+			// CNAME 记录：需要解析其指向的域名获取 IP 列表
+			if s.cnameResolver == nil {
+				log.Printf("任务 %d: CNAME记录需要CNAME解析器支持", task.ID)
+				return
+			}
+			ips, err = s.cnameResolver.ResolveIPs(ctx, record.Value)
+			if err != nil {
+				log.Printf("任务 %d: 解析CNAME %s 失败: %v", task.ID, record.Value, err)
+				return
+			}
+		} else {
+			// A/AAAA 记录：值本身就是 IP，直接探测
+			allRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+				return prov.ListRecords(ctx, task.Domain, task.SubDomain, recordType)
+			})
+			if err != nil {
+				log.Printf("任务 %d: 获取 %s 记录列表失败: %v", task.ID, recordType, err)
+				return
+			}
+			for _, r := range allRecords {
+				ips = append(ips, r.Value)
+			}
+		}
+	}
+
+	if len(ips) == 0 {
+		log.Printf("任务 %d: 域名 %s.%s 未解析到任何IP", task.ID, task.SubDomain, task.Domain)
+		return
+	}
+
+	// 3. 创建探测器
+	p := prober.NewProber(prober.ProbeProtocol(task.ProbeProtocol))
+	if p == nil {
+		log.Printf("任务 %d: 不支持的探测协议 %s", task.ID, task.ProbeProtocol)
+		return
+	}
+
+	timeout := time.Duration(task.TimeoutMs) * time.Millisecond
+
+	// 4. 探测所有解析出的 IP
+	failCount := 0
+	successCount := 0
+	for _, ip := range ips {
+		result := p.Probe(ctx, ip, task.ProbePort, timeout)
+		s.saveProbeResult(task.ID, ip, result)
+
+		counter := s.getOrCreateCounter(runner, ip, "online")
+		s.updateCounter(counter, result.Success)
+
+		if !result.Success {
+			failCount++
+		} else {
+			successCount++
+		}
+
+		log.Printf("任务 %d: CDN探测 IP=%s 成功=%v", task.ID, ip, result.Success)
+	}
+
+	// 5. 使用阈值计算判断失败是否达标（支持百分比和个数）
+	totalIPs := len(ips)
+	threshold := cname.CalculateThreshold(task.FailThresholdType, task.FailThresholdValue, totalIPs)
+	thresholdReached := failCount >= threshold && threshold > 0
+
+	// 使用全局计数器跟踪连续达标/恢复轮次
+	globalCounter := s.getOrCreateCounter(runner, "cdn_global", "online")
+
+	if thresholdReached {
+		globalCounter.ConsecutiveFails++
+		globalCounter.ConsecutiveSuccesses = 0
+	} else if failCount == 0 {
+		// 全部成功才算恢复
+		globalCounter.ConsecutiveSuccesses++
+		globalCounter.ConsecutiveFails = 0
+	} else {
+		// 有失败但未达阈值：重置连续达标计数，不影响恢复计数
+		globalCounter.ConsecutiveFails = 0
+	}
+
+	log.Printf("任务 %d: CDN探测汇总 总IP=%d 失败=%d 阈值=%d(%s:%d) 达标=%v 连续达标轮次=%d 连续恢复轮次=%d",
+		task.ID, totalIPs, failCount, threshold, task.FailThresholdType, task.FailThresholdValue,
+		thresholdReached, globalCounter.ConsecutiveFails, globalCounter.ConsecutiveSuccesses)
+
+	// 6. 已切换状态（CDN已启用），判断是否回切
+	if task.IsSwitched {
+		if model.SwitchBackPolicy(task.SwitchBackPolicy) == model.SwitchBackAuto &&
+			globalCounter.ConsecutiveSuccesses >= task.RecoverThreshold {
+			log.Printf("任务 %d: %s.%s 已恢复健康（连续恢复 %d 轮），执行CDN回切",
+				task.ID, task.SubDomain, task.Domain, globalCounter.ConsecutiveSuccesses)
+
+			// 步骤2已获取当前DNS记录到外层record变量，直接复用
+			// 已切换+CNAME场景：record是当前A记录；其他场景：record是原始记录类型
+			origRecordType := task.OriginalRecordType
+
+			if origRecordType == "CNAME" {
+				// 原始是 CNAME：删除当前 A 记录，重新创建 CNAME 记录
+				log.Printf("任务 %d: 原始记录为CNAME，删除当前A记录后恢复CNAME记录 %s", task.ID, task.OriginalValue)
+
+				// 先关闭 CDN 代理（删除前需要先关闭 proxied）
+				if err := pc.SetProxied(ctx, record.RecordID, false); err != nil {
+					log.Printf("任务 %d: 回切时关闭CDN代理失败: %v", task.ID, err)
+					s.saveOperationLog(task.ID, "cdn_disable", record.RecordID, task.OriginalValue, "A", false,
+						fmt.Sprintf("回切时关闭CDN代理失败: %v", err))
+					return
+				}
+
+				// 删除当前 A 记录
+				if err := retry.Do(ctx, s.retryConfig, func() error {
+					return prov.DeleteRecord(ctx, record.RecordID)
+				}); err != nil {
+					log.Printf("任务 %d: 回切时删除A记录失败: %v", task.ID, err)
+					s.saveOperationLog(task.ID, "cdn_disable", record.RecordID, task.OriginalValue, "A", false,
+						fmt.Sprintf("回切时删除A记录失败: %v", err))
+					return
+				}
+
+				// 重新创建 CNAME 记录
+				_, err := retry.DoWithResult(ctx, s.retryConfig, func() (string, error) {
+					return prov.AddRecord(ctx, task.Domain, task.SubDomain, "CNAME", task.OriginalValue, record.TTL)
+				})
+				if err != nil {
+					log.Printf("任务 %d: 回切时创建CNAME记录失败: %v", task.ID, err)
+					s.saveOperationLog(task.ID, "cdn_disable", "", task.OriginalValue, "CNAME", false,
+						fmt.Sprintf("回切时创建CNAME记录失败: %v", err))
+					return
+				}
+			} else {
+				// 原始是 A/AAAA：直接恢复记录值并关闭代理
+				if task.OriginalValue != "" {
+					if err := prov.UpdateRecordValue(ctx, record.RecordID, task.OriginalValue); err != nil {
+						log.Printf("任务 %d: 恢复原始记录值失败: %v", task.ID, err)
+						s.saveOperationLog(task.ID, "cdn_disable", record.RecordID, task.OriginalValue, origRecordType, false,
+							fmt.Sprintf("恢复原始记录值失败: %v", err))
+						return
+					}
+				}
+
+				if err := pc.SetProxied(ctx, record.RecordID, false); err != nil {
+					log.Printf("任务 %d: 关闭CDN代理失败: %v", task.ID, err)
+					s.saveOperationLog(task.ID, "cdn_disable", record.RecordID, task.OriginalValue, origRecordType, false,
+						fmt.Sprintf("关闭CDN代理失败: %v", err))
+					return
+				}
+			}
+
+			// 更新任务状态
+			if err := s.db.Model(&model.ProbeTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+				"is_switched":   false,
+				"current_value": task.OriginalValue,
+			}).Error; err != nil {
+				log.Printf("任务 %d: 更新任务状态失败: %v", task.ID, err)
+			}
+
+			s.saveOperationLog(task.ID, "cdn_disable", "", task.OriginalValue, origRecordType, true,
+				"源站恢复健康，关闭CDN代理并恢复原始记录值")
+
+			globalCounter.ConsecutiveFails = 0
+			globalCounter.ConsecutiveSuccesses = 0
+			runner.task = s.reloadTask(runner.task)
+			log.Printf("任务 %d: CDN回切成功", task.ID)
+
+			// 发送恢复通知
+			if s.notificationManager != nil {
+				s.notificationManager.Notify(notification.NotificationEvent{
+					Type:           model.EventTypeRecovery,
+					TaskID:         task.ID,
+					Domain:         task.Domain,
+					SubDomain:      task.SubDomain,
+					OccurredAt:     time.Now(),
+					RecoveredValue: task.OriginalValue,
+					HealthStatus:   "healthy",
+				})
+			}
+		}
+		return
+	}
+
+	// 7. 未切换状态，判断是否需要启用CDN故障转移
+	if globalCounter.ConsecutiveFails >= task.FailThreshold {
+		log.Printf("任务 %d: %s.%s 连续 %d 轮失败达阈值（%s:%d），触发CDN故障转移",
+			task.ID, task.SubDomain, task.Domain, globalCounter.ConsecutiveFails, task.FailThresholdType, task.FailThresholdValue)
+
+		// 直接复用步骤2获取的record和recordType（步骤7只在未切换时执行，record就是原始记录）
+		originalValue := record.Value
+		targetIP := task.CDNTarget
+
+		// 根据原始记录类型决定操作方式
+		var newRecordID string
+		if recordType == "CNAME" {
+			// CNAME 记录不能直接改为 IP，需要删除 CNAME 后创建 A 记录
+			log.Printf("任务 %d: 原始记录为CNAME，删除后创建A记录指向目标IP %s", task.ID, targetIP)
+
+			// 删除原始 CNAME 记录
+			if err := retry.Do(ctx, s.retryConfig, func() error {
+				return prov.DeleteRecord(ctx, record.RecordID)
+			}); err != nil {
+				log.Printf("任务 %d: 删除原始CNAME记录失败: %v", task.ID, err)
+				s.saveOperationLog(task.ID, "cdn_enable", record.RecordID, targetIP, recordType, false,
+					fmt.Sprintf("删除原始CNAME记录失败: %v", err))
+				return
+			}
+
+			// 创建 A 记录指向目标 IP
+			newID, err := retry.DoWithResult(ctx, s.retryConfig, func() (string, error) {
+				return prov.AddRecord(ctx, task.Domain, task.SubDomain, "A", targetIP, record.TTL)
+			})
+			if err != nil {
+				log.Printf("任务 %d: 创建A记录失败: %v，尝试恢复CNAME记录", task.ID, err)
+				// 尝试恢复原始 CNAME 记录
+				_, _ = prov.AddRecord(ctx, task.Domain, task.SubDomain, "CNAME", originalValue, record.TTL)
+				s.saveOperationLog(task.ID, "cdn_enable", "", targetIP, "A", false,
+					fmt.Sprintf("创建A记录失败: %v", err))
+				return
+			}
+			newRecordID = newID
+		} else {
+			// A/AAAA 记录可以直接更新值
+			if err := prov.UpdateRecordValue(ctx, record.RecordID, targetIP); err != nil {
+				log.Printf("任务 %d: 切换记录值到目标IP失败: %v", task.ID, err)
+				s.saveOperationLog(task.ID, "cdn_enable", record.RecordID, targetIP, recordType, false,
+					fmt.Sprintf("切换记录值到目标IP失败: %v", err))
+				return
+			}
+			newRecordID = record.RecordID
+		}
+
+		// 启用 CDN 代理（橙色云）
+		if err := pc.SetProxied(ctx, newRecordID, true); err != nil {
+			log.Printf("任务 %d: 启用CDN代理失败: %v", task.ID, err)
+			// 尝试回滚
+			if recordType == "CNAME" {
+				_ = prov.DeleteRecord(ctx, newRecordID)
+				_, _ = prov.AddRecord(ctx, task.Domain, task.SubDomain, "CNAME", originalValue, record.TTL)
+			} else {
+				_ = prov.UpdateRecordValue(ctx, newRecordID, originalValue)
+			}
+			s.saveOperationLog(task.ID, "cdn_enable", newRecordID, targetIP, "A", false,
+				fmt.Sprintf("启用CDN代理失败: %v", err))
+			return
+		}
+
+		// 更新任务状态（记录原始记录类型，回切时需要）
+		if err := s.db.Model(&model.ProbeTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+			"is_switched":          true,
+			"original_value":       originalValue,
+			"original_record_type": recordType,
+			"current_value":        targetIP,
+		}).Error; err != nil {
+			log.Printf("任务 %d: 更新任务状态失败: %v", task.ID, err)
+		}
+
+		s.saveOperationLog(task.ID, "cdn_enable", newRecordID, targetIP, "A", true,
+			fmt.Sprintf("%s.%s 连续 %d 轮失败达阈值（%s:%d），启用CDN代理并切换记录值为 %s",
+				task.SubDomain, task.Domain, globalCounter.ConsecutiveFails, task.FailThresholdType, task.FailThresholdValue, targetIP))
+
+		runner.task = s.reloadTask(runner.task)
+		log.Printf("任务 %d: CDN故障转移成功，已启用CDN代理并切换记录值为 %s", task.ID, targetIP)
+
+		// 发送故障转移通知
+		if s.notificationManager != nil {
+			s.notificationManager.Notify(notification.NotificationEvent{
+				Type:          model.EventTypeFailover,
+				TaskID:        task.ID,
+				Domain:        task.Domain,
+				SubDomain:     task.SubDomain,
+				OccurredAt:    time.Now(),
+				OriginalValue: originalValue,
+				BackupValue:   fmt.Sprintf("%s (CDN proxied=true)", targetIP),
+				HealthStatus:  "unhealthy",
+			})
+		}
+	}
+}
+
+// findCDNRecord 查找CDN故障转移操作的目标DNS记录
+// 根据任务配置的记录类型直接查找对应的DNS记录
+// A_AAAA 类型会依次尝试 A 和 AAAA
+func (s *Scheduler) findCDNRecord(ctx context.Context, prov provider.DNSProvider, task model.ProbeTask) (*provider.DNSRecord, string, error) {
+	// 根据任务配置的记录类型确定要查找的类型列表
+	var recordTypes []string
+	switch model.RecordType(task.RecordType) {
+	case model.RecordTypeCNAME:
+		recordTypes = []string{"CNAME"}
+	case model.RecordTypeA:
+		recordTypes = []string{"A"}
+	case model.RecordTypeAAAA:
+		recordTypes = []string{"AAAA"}
+	default:
+		// A_AAAA 或未指定：依次尝试 A、AAAA
+		recordTypes = []string{"A", "AAAA"}
+	}
+
+	for _, rt := range recordTypes {
+		records, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
+			return prov.ListRecords(ctx, task.Domain, task.SubDomain, rt)
+		})
+		if err != nil {
+			log.Printf("任务 %d: 获取 %s 记录失败: %v", task.ID, rt, err)
+			continue
+		}
+		if len(records) > 0 {
+			log.Printf("任务 %d: 找到 %s 记录 (RecordID=%s, Value=%s)", task.ID, rt, records[0].RecordID, records[0].Value)
+			return &records[0], rt, nil
+		}
+	}
+
+	return nil, "", fmt.Errorf("未找到 %s 类型的DNS记录", task.RecordType)
 }
 
 // executeSwitchProbe 执行切换类型任务的探测

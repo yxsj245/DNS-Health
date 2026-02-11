@@ -35,7 +35,7 @@
           <el-tag v-else type="info">已停止</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="任务类型">
-          {{ task.task_type === 'switch' ? '切换解析' : '暂停/删除' }}
+          {{ task.task_type === 'switch' ? '切换解析' : (task.task_type === 'cdn_switch' ? 'CDN 故障转移' : '暂停/删除') }}
         </el-descriptions-item>
         <el-descriptions-item label="记录类型">
           {{ task.record_type === 'CNAME' ? 'CNAME' : 'A/AAAA' }}
@@ -44,7 +44,10 @@
           {{ task.pool_name || '-' }}
         </el-descriptions-item>
         <el-descriptions-item label="回切策略">
-          {{ task.task_type === 'switch' ? (task.switch_back_policy === 'auto' ? '自动回切' : '保持当前') : '-' }}
+          {{ (task.task_type === 'switch' || task.task_type === 'cdn_switch') ? (task.switch_back_policy === 'auto' ? '自动回切' : '保持当前') : '-' }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="task.task_type === 'cdn_switch'" label="目标 IP">
+          {{ task.cdn_target || '-' }}
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -148,6 +151,8 @@
               <el-option label="恢复" value="resume" />
               <el-option label="添加" value="add" />
               <el-option label="切换" value="switch" />
+              <el-option label="启用CDN" value="cdn_enable" />
+              <el-option label="关闭CDN" value="cdn_disable" />
             </el-select>
             <el-date-picker
               v-model="logsStartTime"
@@ -361,7 +366,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link } from '@element-plus/icons-vue'
@@ -373,8 +378,8 @@ import LatencyChart from '../components/LatencyChart.vue'
 const route = useRoute()
 const router = useRouter()
 
-// 任务 ID，从路由参数获取
-const taskId = route.params.id
+// 任务 ID，从路由参数获取（使用 computed 保持响应式，避免组件复用时 ID 不更新）
+const taskId = computed(() => route.params.id)
 
 // ==================== 状态定义 ====================
 
@@ -396,7 +401,8 @@ const task = reactive({
   switch_back_policy: '',
   is_switched: false,
   original_value: '',
-  current_value: ''
+  current_value: '',
+  cdn_target: ''
 })
 const taskLoading = ref(false)
 
@@ -468,7 +474,9 @@ const operationTypeLabel = (type) => {
     delete: '删除',
     resume: '恢复',
     add: '添加',
-    switch: '切换'
+    switch: '切换',
+    cdn_enable: '启用CDN',
+    cdn_disable: '关闭CDN'
   }
   return labels[type] || type
 }
@@ -489,7 +497,7 @@ const goBack = () => {
 const fetchTask = async () => {
   taskLoading.value = true
   try {
-    const response = await api.get(`/tasks/${taskId}`)
+    const response = await api.get(`/tasks/${taskId.value}`)
     Object.assign(task, response.data)
   } catch (error) {
     ElMessage.error('获取任务信息失败')
@@ -517,7 +525,7 @@ const fetchHistory = async () => {
     if (historyStatusFilter.value !== '' && historyStatusFilter.value !== null) {
       params.success = historyStatusFilter.value
     }
-    const response = await api.get(`/tasks/${taskId}/history`, { params })
+    const response = await api.get(`/tasks/${taskId.value}/history`, { params })
     historyData.value = response.data.data || []
     historyTotal.value = response.data.total || 0
   } catch (error) {
@@ -558,7 +566,7 @@ const fetchLogs = async () => {
     if (logsEndTime.value) {
       params.end_time = logsEndTime.value.toISOString()
     }
-    const response = await api.get(`/tasks/${taskId}/logs`, { params })
+    const response = await api.get(`/tasks/${taskId.value}/logs`, { params })
     logsData.value = response.data.data || []
     logsTotal.value = response.data.total || 0
   } catch (error) {
@@ -574,7 +582,7 @@ const fetchLogs = async () => {
  */
 const fetchLatencyIpList = async () => {
   try {
-    const response = await api.get(`/tasks/${taskId}/ips`)
+    const response = await api.get(`/tasks/${taskId.value}/ips`)
     const data = response.data || []
     latencyIpList.value = data.map(item => item.ip).filter(Boolean)
   } catch (error) {
@@ -589,7 +597,7 @@ const fetchLatencyIpList = async () => {
 const fetchIPs = async () => {
   ipsLoading.value = true
   try {
-    const response = await api.get(`/tasks/${taskId}/ips`)
+    const response = await api.get(`/tasks/${taskId.value}/ips`)
     ipsData.value = response.data || []
   } catch (error) {
     ElMessage.error('获取 IP 列表失败')
@@ -609,7 +617,7 @@ const handleExcludeIP = async (row) => {
       '排除确认',
       { confirmButtonText: '确定排除', cancelButtonText: '取消', type: 'warning' }
     )
-    await api.post(`/tasks/${taskId}/ips/exclude`, { ip: row.ip })
+    await api.post(`/tasks/${taskId.value}/ips/exclude`, { ip: row.ip })
     ElMessage.success(`已排除 IP: ${row.ip}`)
     fetchIPs()
   } catch (err) {
@@ -630,7 +638,7 @@ const handleIncludeIP = async (row) => {
       '恢复确认',
       { confirmButtonText: '确定恢复', cancelButtonText: '取消', type: 'info' }
     )
-    await api.post(`/tasks/${taskId}/ips/include`, { ip: row.ip })
+    await api.post(`/tasks/${taskId.value}/ips/include`, { ip: row.ip })
     ElMessage.success(`已恢复 IP: ${row.ip}`)
     fetchIPs()
   } catch (err) {
@@ -647,7 +655,7 @@ const handleIncludeIP = async (row) => {
 const fetchCnameInfo = async () => {
   cnameLoading.value = true
   try {
-    const response = await api.get(`/tasks/${taskId}/cname`)
+    const response = await api.get(`/tasks/${taskId.value}/cname`)
     const data = response.data || {}
     cnameInfo.records = data.records || []
     cnameInfo.targets = data.targets || []
@@ -684,6 +692,17 @@ onMounted(() => {
   fetchTask()
   fetchLatencyIpList()
   fetchHistory()
+})
+
+// 监听路由参数变化，组件复用时重新加载数据
+watch(() => route.params.id, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    // 重置标签页到默认
+    activeTab.value = 'history'
+    fetchTask()
+    fetchLatencyIpList()
+    fetchHistory()
+  }
 })
 </script>
 

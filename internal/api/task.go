@@ -55,6 +55,9 @@ type CreateTaskRequest struct {
 	// CNAME专用字段 - 失败阈值配置
 	FailThresholdType  string `json:"fail_threshold_type"`  // 阈值类型: count / percent（默认 count）
 	FailThresholdValue int    `json:"fail_threshold_value"` // 阈值数值（默认 1）
+
+	// CDN故障转移专用字段
+	CDNTarget string `json:"cdn_target"` // CDN故障转移的目标IP（故障时将记录值切换为此IP）
 }
 
 // TaskResponse 探测任务响应
@@ -83,6 +86,9 @@ type TaskResponse struct {
 	OriginalValue string `json:"original_value,omitempty"` // 原始解析值（用于回切）
 	CurrentValue  string `json:"current_value,omitempty"`  // 当前解析值
 	IsSwitched    bool   `json:"is_switched"`              // 是否已切换到备用资源
+
+	// CDN故障转移专用字段
+	CDNTarget string `json:"cdn_target,omitempty"` // CDN故障转移的目标IP
 
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
@@ -115,6 +121,9 @@ func taskToResponse(task model.ProbeTask) TaskResponse {
 		OriginalValue: task.OriginalValue,
 		CurrentValue:  task.CurrentValue,
 		IsSwitched:    task.IsSwitched,
+
+		// CDN故障转移专用字段
+		CDNTarget: task.CDNTarget,
 
 		CreatedAt: task.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt: task.UpdatedAt.Format("2006-01-02 15:04:05"),
@@ -194,7 +203,7 @@ func validateTaskRequest(req *CreateTaskRequest, db *gorm.DB, pm pool.PoolManage
 
 	// 验证任务类型
 	if !model.IsValidTaskType(req.TaskType) {
-		return "任务类型无效，必须是 pause_delete 或 switch"
+		return "任务类型无效，必须是 pause_delete、switch 或 cdn_switch"
 	}
 
 	// 验证解析记录类型
@@ -215,6 +224,20 @@ func validateTaskRequest(req *CreateTaskRequest, db *gorm.DB, pm pool.PoolManage
 	// 验证失败阈值数值为正整数
 	if req.FailThresholdValue <= 0 {
 		return "失败阈值数值必须为正整数"
+	}
+
+	// cdn_switch 类型任务的专用验证
+	if req.TaskType == string(model.TaskTypeCDNSwitch) {
+		// 验证关联凭证的 provider_type 为 cloudflare
+		if credential.ProviderType != "cloudflare" {
+			return "CDN 故障转移仅支持 Cloudflare 服务商"
+		}
+		// 验证故障转移目标 IP 非空
+		if req.CDNTarget == "" {
+			return "CDN 故障转移任务必须指定目标 IP"
+		}
+		// cdn_switch 不需要解析池，跳过后续池验证
+		return ""
 	}
 
 	// 验证切换类型任务必须关联解析池
@@ -332,6 +355,9 @@ func (h *TaskHandler) CreateTask(c *gin.Context) {
 		SwitchBackPolicy:   req.SwitchBackPolicy,
 		FailThresholdType:  req.FailThresholdType,
 		FailThresholdValue: req.FailThresholdValue,
+
+		// CDN故障转移专用字段
+		CDNTarget: req.CDNTarget,
 	}
 
 	if err := h.DB.Create(&task).Error; err != nil {
@@ -408,6 +434,9 @@ func (h *TaskHandler) UpdateTask(c *gin.Context) {
 	task.SwitchBackPolicy = req.SwitchBackPolicy
 	task.FailThresholdType = req.FailThresholdType
 	task.FailThresholdValue = req.FailThresholdValue
+
+	// 更新CDN故障转移专用字段
+	task.CDNTarget = req.CDNTarget
 
 	if err := h.DB.Save(&task).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新任务失败"})

@@ -30,8 +30,20 @@ const providerConfig = {
         required: true
       }
     ]
+  },
+  // Cloudflare DNS 服务商凭证配置
+  cloudflare: {
+    label: 'Cloudflare',
+    fields: [
+      {
+        key: 'api_token',
+        label: 'API Token',
+        placeholder: '请输入 Cloudflare API Token',
+        type: 'password',
+        required: true
+      }
+    ]
   }
-  // 后续新增服务商在此添加配置即可
 }
 
 /**

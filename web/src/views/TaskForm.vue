@@ -12,7 +12,7 @@
       <el-steps :active="currentStep" finish-status="success" align-center class="wizard-steps">
         <el-step title="任务类型" description="选择故障转移方式" />
         <el-step title="记录类型" description="选择DNS记录类型" />
-        <el-step v-if="form.task_type === 'switch'" title="回切策略" description="选择故障恢复后的处理方式" />
+        <el-step v-if="form.task_type === 'switch' || form.task_type === 'cdn_switch'" title="回切策略" description="选择故障恢复后的处理方式" />
         <el-step title="任务配置" description="填写详细参数" />
       </el-steps>
 
@@ -43,10 +43,23 @@
               当探测目标连续失败达到阈值时，自动将 DNS 解析切换到备用解析池中的健康资源。支持自动回切或保持当前解析，适合需要高可用切换的场景。
             </div>
           </div>
+          <!-- CDN 故障转移：仅 Cloudflare 凭证时显示 -->
+          <div
+            v-if="isCloudflareCredential"
+            class="type-card"
+            :class="{ active: form.task_type === 'cdn_switch' }"
+            @click="form.task_type = 'cdn_switch'"
+          >
+            <div class="type-card-icon"><el-icon><Connection /></el-icon></div>
+            <div class="type-card-title">CDN 故障转移</div>
+            <div class="type-card-desc">
+              通过探测 CNAME 域名解析出的 IP 健康状态，当连续失败达到阈值时，自动启用 Cloudflare CDN 代理（橙色云）并将记录值切换为指定的目标 IP。恢复后可自动关闭 CDN 代理并恢复原始记录值，仅限 Cloudflare 服务商使用。
+            </div>
+          </div>
         </div>
         <div class="wizard-actions">
           <el-button @click="handleCancel">取消</el-button>
-          <el-button type="primary" @click="currentStep = 1">下一步</el-button>
+          <el-button type="primary" @click="handleStep1Next">下一步</el-button>
         </div>
       </div>
 
@@ -84,8 +97,8 @@
         </div>
       </div>
 
-      <!-- 步骤 3：选择回切策略（仅切换解析类型显示） -->
-      <div v-if="currentStep === 2 && form.task_type === 'switch'" class="wizard-content">
+      <!-- 回切策略步骤（切换解析或CDN故障转移时显示） -->
+      <div v-if="currentStep === switchBackStep && (form.task_type === 'switch' || form.task_type === 'cdn_switch')" class="wizard-content">
         <h3 class="step-title">请选择回切策略</h3>
         <p class="step-desc">回切策略决定了当原始解析目标恢复健康后，系统是否自动切换回原始解析。</p>
         <div class="type-cards">
@@ -113,13 +126,13 @@
           </div>
         </div>
         <div class="wizard-actions">
-          <el-button @click="currentStep = 1">上一步</el-button>
-          <el-button type="primary" @click="currentStep = 3">下一步</el-button>
+          <el-button @click="currentStep = switchBackStep - 1">上一步</el-button>
+          <el-button type="primary" @click="currentStep = formStep">下一步</el-button>
         </div>
       </div>
 
-      <!-- 步骤 3/4：任务配置表单（分组卡片布局） -->
-      <div v-if="currentStep === (form.task_type === 'switch' ? 3 : 2)" class="wizard-content wizard-form-content">
+      <!-- 任务配置表单步骤（分组卡片布局） -->
+      <div v-if="currentStep === formStep" class="wizard-content wizard-form-content">
         <el-form
           ref="formRef"
           :model="form"
@@ -129,13 +142,13 @@
           <!-- 已选配置摘要 -->
           <div class="config-summary">
             <el-tag type="primary" effect="dark" size="large">
-              {{ form.task_type === 'switch' ? '切换解析' : '暂停/删除' }}
+              {{ form.task_type === 'switch' ? '切换解析' : (form.task_type === 'cdn_switch' ? 'CDN 故障转移' : '暂停/删除') }}
             </el-tag>
             <span class="summary-divider">+</span>
             <el-tag type="success" effect="dark" size="large">
               {{ form.record_type === 'CNAME' ? 'CNAME' : 'A/AAAA' }}
             </el-tag>
-            <template v-if="form.task_type === 'switch'">
+            <template v-if="form.task_type === 'switch' || form.task_type === 'cdn_switch'">
               <span class="summary-divider">+</span>
               <el-tag type="warning" effect="dark" size="large">
                 {{ form.switch_back_policy === 'auto' ? '自动回切' : '保持当前' }}
@@ -145,17 +158,21 @@
           </div>
 
           <!-- 故障转移配置（条件显示） -->
-          <el-card v-if="showPoolField || showCnameThresholdField" class="form-section" shadow="never">
+          <el-card v-if="showPoolField || showCdnSwitchField || showCnameThresholdField" class="form-section" shadow="never">
             <template #header>
               <div class="section-header">
                 <el-icon><Switch /></el-icon>
-                <span>{{ showPoolField ? '故障转移配置' : 'CNAME 阈值配置' }}</span>
+                <span>{{ showCdnSwitchField ? 'CDN 故障转移配置' : (showPoolField ? '故障转移配置' : 'CNAME 阈值配置') }}</span>
               </div>
             </template>
             <el-form-item v-if="showPoolField" label="解析池" prop="pool_id">
               <el-select v-model="form.pool_id" placeholder="请选择解析池" style="width: 100%">
                 <el-option v-for="pool in pools" :key="pool.id" :label="pool.name" :value="pool.id" />
               </el-select>
+            </el-form-item>
+            <!-- CDN 故障转移：目标 IP 输入 -->
+            <el-form-item v-if="showCdnSwitchField" label="目标 IP" prop="cdn_target">
+              <el-input v-model="form.cdn_target" placeholder="请输入故障转移时切换到的目标 IP 地址" />
             </el-form-item>
             <el-form-item v-if="showCnameThresholdField" label="阈值类型" prop="fail_threshold_type">
               <el-select v-model="form.fail_threshold_type" placeholder="请选择阈值类型" style="width: 100%">
@@ -286,26 +303,36 @@
         <!-- 已选配置摘要（只读） -->
         <div class="config-summary">
           <el-tag type="primary" effect="dark" size="large">
-            {{ form.task_type === 'switch' ? '切换解析' : '暂停/删除' }}
+            {{ form.task_type === 'switch' ? '切换解析' : (form.task_type === 'cdn_switch' ? 'CDN 故障转移' : '暂停/删除') }}
           </el-tag>
           <span class="summary-divider">+</span>
           <el-tag type="success" effect="dark" size="large">
             {{ form.record_type === 'CNAME' ? 'CNAME' : 'A/AAAA' }}
           </el-tag>
+          <template v-if="form.task_type === 'switch' || form.task_type === 'cdn_switch'">
+            <span class="summary-divider">+</span>
+            <el-tag type="warning" effect="dark" size="large">
+              {{ form.switch_back_policy === 'auto' ? '自动回切' : '保持当前' }}
+            </el-tag>
+          </template>
         </div>
 
         <!-- 故障转移配置（条件显示） -->
-        <el-card v-if="showPoolField || showSwitchBackField || showCnameThresholdField" class="form-section" shadow="never">
+        <el-card v-if="showPoolField || showSwitchBackField || showCdnSwitchField || showCnameThresholdField" class="form-section" shadow="never">
           <template #header>
             <div class="section-header">
               <el-icon><Switch /></el-icon>
-              <span>{{ showPoolField ? '故障转移配置' : 'CNAME 阈值配置' }}</span>
+              <span>{{ showCdnSwitchField ? 'CDN 故障转移配置' : (showPoolField ? '故障转移配置' : 'CNAME 阈值配置') }}</span>
             </div>
           </template>
           <el-form-item v-if="showPoolField" label="解析池" prop="pool_id">
             <el-select v-model="form.pool_id" placeholder="请选择解析池" style="width: 100%">
               <el-option v-for="pool in pools" :key="pool.id" :label="pool.name" :value="pool.id" />
             </el-select>
+          </el-form-item>
+          <!-- CDN 故障转移：目标 IP 输入 -->
+          <el-form-item v-if="showCdnSwitchField" label="目标 IP" prop="cdn_target">
+            <el-input v-model="form.cdn_target" placeholder="请输入故障转移时切换到的目标 IP 地址" />
           </el-form-item>
           <el-form-item v-if="showSwitchBackField" label="回切策略" prop="switch_back_policy">
             <el-select v-model="form.switch_back_policy" placeholder="请选择回切策略" style="width: 100%">
@@ -430,10 +457,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { CircleClose, Switch, Position, Link, Monitor, RefreshRight, Lock } from '@element-plus/icons-vue'
+import { CircleClose, Switch, Position, Link, Monitor, RefreshRight, Lock, Connection } from '@element-plus/icons-vue'
 import api from '../api'
 
 // ==================== 路由与状态 ====================
@@ -479,7 +506,8 @@ const form = reactive({
   pool_id: null,
   switch_back_policy: 'auto',
   fail_threshold_type: 'count',
-  fail_threshold_value: 1
+  fail_threshold_value: 1,
+  cdn_target: ''
 })
 
 // ==================== 计算属性 ====================
@@ -494,7 +522,7 @@ const showPortField = computed(() => {
 
 /**
  * 是否显示解析池选择器
- * 仅切换解析类型时显示（暂停/删除+CNAME不需要解析池，直接对CNAME记录执行暂停/删除）
+ * 仅切换解析类型时显示（暂停/删除+CNAME不需要解析池，CDN故障转移也不需要解析池）
  */
 const showPoolField = computed(() => {
   return form.task_type === 'switch'
@@ -502,43 +530,101 @@ const showPoolField = computed(() => {
 
 /**
  * 是否显示回切策略选择器
- * 编辑模式下，切换解析类型时显示
+ * 编辑模式下，切换解析或CDN故障转移类型时显示
  */
 const showSwitchBackField = computed(() => {
-  return isEditMode.value && form.task_type === 'switch'
+  return isEditMode.value && (form.task_type === 'switch' || form.task_type === 'cdn_switch')
 })
 
 /**
- * 是否显示CNAME阈值配置
- * 仅CNAME记录类型时显示
+ * 是否显示 CDN 故障转移配置（CNAME 目标值输入）
+ * 仅 cdn_switch 类型时显示
+ */
+const showCdnSwitchField = computed(() => {
+  return form.task_type === 'cdn_switch'
+})
+
+/**
+ * 是否显示阈值配置（百分比/个数）
+ * CNAME记录类型 或 CDN故障转移类型时显示
  */
 const showCnameThresholdField = computed(() => {
-  return form.record_type === 'CNAME'
+  return form.record_type === 'CNAME' || form.task_type === 'cdn_switch'
+})
+
+/**
+ * 获取当前选中凭证的 provider_type
+ * 用于判断是否显示 CDN 故障转移选项
+ */
+const selectedCredentialProviderType = computed(() => {
+  if (!form.credential_id) return ''
+  const cred = credentials.value.find(c => c.id === form.credential_id)
+  return cred ? cred.provider_type : ''
+})
+
+/**
+ * 是否为 Cloudflare 凭证
+ * 创建模式下：凭证列表中存在 Cloudflare 凭证时显示 CDN 故障转移选项
+ * 编辑模式下：当前选中凭证为 Cloudflare 时显示
+ */
+const isCloudflareCredential = computed(() => {
+  if (isEditMode.value) {
+    return selectedCredentialProviderType.value === 'cloudflare'
+  }
+  // 创建模式：如果已选凭证则按选中的判断，否则检查是否存在任何 Cloudflare 凭证
+  if (form.credential_id) {
+    return selectedCredentialProviderType.value === 'cloudflare'
+  }
+  return credentials.value.some(c => c.provider_type === 'cloudflare')
 })
 
 // ==================== 事件处理 ====================
 
 /**
+ * 步骤导航计算属性
+ * 所有类型都经过记录类型步骤
+ */
+const switchBackStep = computed(() => {
+  // 切换解析/CDN故障转移：步骤0(类型) → 步骤1(记录类型) → 步骤2(回切策略)
+  return 2
+})
+
+const formStep = computed(() => {
+  // 切换解析/CDN故障转移：步骤0(类型) → 步骤1(记录类型) → 步骤2(回切策略) → 步骤3(表单)
+  // 暂停/删除：步骤0(类型) → 步骤1(记录类型) → 步骤2(表单)
+  if (form.task_type === 'switch' || form.task_type === 'cdn_switch') return 3
+  return 2
+})
+
+/**
+ * 步骤1下一步处理
+ * 所有类型都进入记录类型步骤
+ */
+const handleStep1Next = () => {
+  currentStep.value = 1
+}
+
+/**
  * 步骤2下一步处理
- * 如果是切换解析类型，跳转到步骤3（回切策略）
- * 否则跳转到步骤2（任务配置）
+ * 切换解析或CDN故障转移跳转到回切策略步骤
+ * 否则跳转到表单步骤
  */
 const handleStep2Next = () => {
-  if (form.task_type === 'switch') {
-    currentStep.value = 2
+  if (form.task_type === 'switch' || form.task_type === 'cdn_switch') {
+    currentStep.value = 2 // 到回切策略
   } else {
-    currentStep.value = 2
+    currentStep.value = 2 // 到表单
   }
 }
 
 /**
  * 任务配置表单上一步处理
- * 如果是切换解析类型，返回步骤3（回切策略）
+ * 如果是切换解析或CDN故障转移类型，返回步骤3（回切策略）
  * 否则返回步骤1（记录类型）
  */
 const handleFormPrevStep = () => {
-  if (form.task_type === 'switch') {
-    currentStep.value = 2
+  if (form.task_type === 'switch' || form.task_type === 'cdn_switch') {
+    currentStep.value = switchBackStep.value
   } else {
     currentStep.value = 1
   }
@@ -610,6 +696,9 @@ const formRules = reactive({
   ],
   fail_threshold_value: [
     { required: true, validator: validatePositiveInt, trigger: 'blur' }
+  ],
+  cdn_target: [
+    { required: true, message: '请输入目标 IP 地址', trigger: 'blur' }
   ]
 })
 
@@ -668,6 +757,7 @@ const fetchTask = async () => {
     form.switch_back_policy = task.switch_back_policy || 'auto'
     form.fail_threshold_type = task.fail_threshold_type || 'count'
     form.fail_threshold_value = task.fail_threshold_value || 1
+    form.cdn_target = task.cdn_target || ''
   } catch (error) {
     ElMessage.error('获取任务数据失败')
     router.push('/tasks')
@@ -681,6 +771,15 @@ const fetchTask = async () => {
  */
 const handleSubmit = async () => {
   if (!formRef.value) return
+
+  // CDN 故障转移时手动验证
+  if (form.task_type === 'cdn_switch') {
+    if (!form.cdn_target.trim()) {
+      ElMessage.error('请输入目标 IP 地址')
+      return
+    }
+  }
+
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
 
@@ -699,9 +798,10 @@ const handleSubmit = async () => {
     task_type: form.task_type,
     record_type: form.record_type,
     pool_id: showPoolField.value ? form.pool_id : null,
-    switch_back_policy: showSwitchBackField.value ? form.switch_back_policy : '',
+    switch_back_policy: (showSwitchBackField.value || form.task_type === 'switch' || form.task_type === 'cdn_switch') ? form.switch_back_policy : '',
     fail_threshold_type: showCnameThresholdField.value ? form.fail_threshold_type : '',
-    fail_threshold_value: showCnameThresholdField.value ? form.fail_threshold_value : 0
+    fail_threshold_value: showCnameThresholdField.value ? form.fail_threshold_value : 0,
+    cdn_target: showCdnSwitchField.value ? form.cdn_target : ''
   }
 
   try {
@@ -729,6 +829,13 @@ const handleCancel = () => {
 }
 
 // ==================== 生命周期 ====================
+
+// 监听凭证变化：如果当前选择了 cdn_switch 但凭证不是 Cloudflare，则重置任务类型
+watch(() => form.credential_id, () => {
+  if (form.task_type === 'cdn_switch' && form.credential_id && selectedCredentialProviderType.value !== 'cloudflare') {
+    form.task_type = 'pause_delete'
+  }
+})
 
 onMounted(async () => {
   await fetchCredentials()

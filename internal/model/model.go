@@ -13,6 +13,8 @@ const (
 	TaskTypePauseDelete TaskType = "pause_delete"
 	// TaskTypeSwitch 切换解析类型（新功能）
 	TaskTypeSwitch TaskType = "switch"
+	// TaskTypeCDNSwitch CDN故障转移类型（通过Cloudflare proxied字段控制CDN代理开关）
+	TaskTypeCDNSwitch TaskType = "cdn_switch"
 )
 
 // RecordType 解析记录类型
@@ -64,7 +66,7 @@ const (
 // IsValidTaskType 验证任务类型是否有效
 func IsValidTaskType(t string) bool {
 	switch TaskType(t) {
-	case TaskTypePauseDelete, TaskTypeSwitch:
+	case TaskTypePauseDelete, TaskTypeSwitch, TaskTypeCDNSwitch:
 		return true
 	default:
 		return false
@@ -151,9 +153,13 @@ type ProbeTask struct {
 	Enabled          bool `gorm:"not null;default:true"`
 
 	// 切换状态跟踪
-	OriginalValue string // 原始解析值（用于回切）
-	CurrentValue  string // 当前解析值
-	IsSwitched    bool   `gorm:"default:false"` // 是否已切换到备用资源
+	OriginalValue      string // 原始解析值（用于回切）
+	OriginalRecordType string // 原始记录类型（用于CDN故障转移回切时恢复正确的记录类型）
+	CurrentValue       string // 当前解析值
+	IsSwitched         bool   `gorm:"default:false"` // 是否已切换到备用资源
+
+	// CDN故障转移专用字段
+	CDNTarget string `json:"cdn_target" gorm:"column:cdn_target"` // CDN故障转移的目标IP（故障时将记录值切换为此IP）
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

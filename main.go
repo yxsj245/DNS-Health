@@ -26,6 +26,7 @@ import (
 	"dns-health-monitor/internal/pool"
 	"dns-health-monitor/internal/provider"
 	"dns-health-monitor/internal/provider/aliyun"
+	"dns-health-monitor/internal/provider/cloudflare"
 	"dns-health-monitor/internal/scheduler"
 
 	"github.com/gin-gonic/gin"
@@ -160,6 +161,13 @@ func createProviderFactory(encryptKey []byte) scheduler.ProviderFactory {
 				return nil, fmt.Errorf("阿里云凭证缺少 access_key_id 或 access_key_secret")
 			}
 			return aliyun.NewAliyunDNSClient(accessKeyID, accessKeySecret), nil
+		case "cloudflare":
+			// 从解密后的凭证字段中提取 Cloudflare API Token
+			apiToken := fields["api_token"]
+			if apiToken == "" {
+				return nil, fmt.Errorf("Cloudflare 凭证缺少 api_token")
+			}
+			return cloudflare.NewCloudflareDNSClient(apiToken), nil
 		default:
 			return nil, fmt.Errorf("不支持的服务商类型: %s", credential.ProviderType)
 		}

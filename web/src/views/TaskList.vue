@@ -28,7 +28,7 @@
       <!-- 任务类型列 -->
       <el-table-column label="任务类型" min-width="110">
         <template #default="{ row }">
-          {{ row.task_type === 'switch' ? '切换解析' : '暂停/删除' }}
+          {{ row.task_type === 'switch' ? '切换解析' : (row.task_type === 'cdn_switch' ? 'CDN 故障转移' : '暂停/删除') }}
         </template>
       </el-table-column>
 

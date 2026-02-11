@@ -94,3 +94,20 @@ type DNSProvider interface {
 	// 返回记录的当前值（IP地址或域名），或错误信息。
 	GetRecordValue(ctx context.Context, recordID string) (string, error)
 }
+
+// ProxiedController CDN 代理控制接口（可选实现）。
+// 仅 Cloudflare 等支持 CDN 代理的服务商需要实现此接口。
+// 调度器通过类型断言检查 provider 是否实现了此接口，
+// 以决定是否可以执行 CDN 故障转移操作。
+type ProxiedController interface {
+	// SetProxied 设置指定 DNS 记录的 CDN 代理状态。
+	// recordID: 记录 ID
+	// proxied: true 表示启用 CDN 代理（橙色云），false 表示仅 DNS 解析（灰色云）
+	// 返回错误信息（如果有）。
+	SetProxied(ctx context.Context, recordID string, proxied bool) error
+
+	// GetProxied 获取指定 DNS 记录的当前 CDN 代理状态。
+	// recordID: 记录 ID
+	// 返回当前的 proxied 状态和错误信息。
+	GetProxied(ctx context.Context, recordID string) (bool, error)
+}
