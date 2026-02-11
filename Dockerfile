@@ -19,11 +19,8 @@ ARG TARGETPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
 
-# 安装 CGO 依赖和交叉编译工具链
-RUN apk add --no-cache gcc musl-dev && \
-    if [ "$TARGETARCH" = "arm64" ]; then \
-      apk add --no-cache aarch64-none-elf-gcc; \
-    fi
+# 安装构建依赖
+RUN apk add --no-cache gcc musl-dev
 
 WORKDIR /app
 
