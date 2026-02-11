@@ -63,7 +63,9 @@
 ## 支持的云服务商
 
 目前支持：
-- **阿里云 DNS**（Alibaba Cloud DNS）
+- **阿里云 DNS**
+- **腾讯云 DNS**
+- **cloudflare DNS**
 
 架构设计支持扩展更多服务商（腾讯云、AWS Route53 等）
 
