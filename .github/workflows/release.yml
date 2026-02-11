@@ -36,18 +36,14 @@ jobs:
 
       - name: 生成 Docker 标签
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_IMAGE }}
-          tags: |
-            # Release 触发：使用版本号
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            # 手动触发：使用输入的标签
-            type=raw,value=${{ inputs.docker_tag || 'latest' }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            # Release 触发：latest
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            echo "tags=${{ env.DOCKER_IMAGE }}:${VERSION},${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_OUTPUT
+          else
+            TAG="${{ inputs.docker_tag || 'dev' }}"
+            echo "tags=${{ env.DOCKER_IMAGE }}:${TAG},${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_OUTPUT
+          fi
 
       - name: 构建并推送 Docker 镜像
         uses: docker/build-push-action@v6
@@ -56,7 +52,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -104,6 +99,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+
+      - name: 同步依赖
+        run: go mod tidy
 
       - name: 编译二进制文件
         env:
