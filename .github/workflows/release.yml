@@ -5,6 +5,15 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      build_target:
+        description: '构建目标'
+        required: true
+        type: choice
+        options:
+          - all
+          - docker
+          - binary
+        default: 'all'
       docker_tag:
         description: 'Docker 镜像标签（手动触发时使用）'
         required: false
@@ -20,6 +29,7 @@ jobs:
   # ==================== Docker 构建推送 ====================
   docker:
     name: 构建 Docker 镜像
+    if: github.event_name == 'release' || inputs.build_target == 'all' || inputs.build_target == 'docker'
     runs-on: ubuntu-latest
     steps:
       - name: 签出代码
@@ -61,6 +71,7 @@ jobs:
   # ==================== 二进制文件构建 ====================
   binary:
     name: 构建二进制文件 (${{ matrix.goos }}/${{ matrix.goarch }})
+    if: github.event_name == 'release' || inputs.build_target == 'all' || inputs.build_target == 'binary'
     runs-on: ubuntu-latest
     strategy:
       matrix:
