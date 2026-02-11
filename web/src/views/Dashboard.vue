@@ -3,6 +3,32 @@
   <div class="dashboard-page">
     <h2 class="page-title">系统总览</h2>
 
+    <!-- 系统时间与运行时间 -->
+    <el-row :gutter="16" class="summary-row">
+      <el-col :span="12">
+        <el-card shadow="hover" class="time-card">
+          <div class="time-info">
+            <el-icon :size="28" color="#409eff"><Clock /></el-icon>
+            <div class="time-detail">
+              <div class="time-label">当前系统时间</div>
+              <div class="time-value">{{ currentTime }}</div>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="12">
+        <el-card shadow="hover" class="time-card">
+          <div class="time-info">
+            <el-icon :size="28" color="#67c23a"><Timer /></el-icon>
+            <div class="time-detail">
+              <div class="time-label">程序已运行时间</div>
+              <div class="time-value">{{ uptimeText }}</div>
+            </div>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <!-- 任务统计卡片 -->
     <el-row :gutter="16" class="summary-row">
       <el-col :span="6">
@@ -137,9 +163,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Clock, Timer } from '@element-plus/icons-vue'
 import api from '../api'
 
 // ==================== 路由 ====================
@@ -147,6 +174,15 @@ import api from '../api'
 const router = useRouter()
 
 // ==================== 状态定义 ====================
+
+// 当前系统时间（每秒更新）
+const currentTime = ref('')
+// 程序启动时间（从后端获取）
+const serverStartTime = ref(null)
+// 运行时长文本
+const uptimeText = ref('加载中...')
+// 定时器引用
+let timeTimer = null
 
 // 系统总览统计数据
 const stats = ref({
@@ -209,10 +245,67 @@ const fetchStats = async () => {
   }
 }
 
+/**
+ * 获取服务器启动时间
+ * 调用 GET /api/system-info
+ */
+const fetchSystemInfo = async () => {
+  try {
+    const res = await api.get('/system-info')
+    if (res.data.start_time) {
+      serverStartTime.value = new Date(res.data.start_time)
+    }
+  } catch {
+    // 获取失败不影响其他功能
+  }
+}
+
+/**
+ * 更新当前时间和运行时长
+ */
+const updateTime = () => {
+  const now = new Date()
+  currentTime.value = now.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  })
+
+  // 计算运行时长
+  if (serverStartTime.value) {
+    const diff = now - serverStartTime.value
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24))
+    const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+    const seconds = Math.floor((diff % (1000 * 60)) / 1000)
+
+    const parts = []
+    if (days > 0) parts.push(`${days} 天`)
+    if (hours > 0) parts.push(`${hours} 小时`)
+    if (minutes > 0) parts.push(`${minutes} 分钟`)
+    parts.push(`${seconds} 秒`)
+    uptimeText.value = parts.join(' ')
+  }
+}
+
 // ==================== 生命周期 ====================
 
-onMounted(() => {
+onMounted(async () => {
   fetchStats()
+  await fetchSystemInfo()
+  updateTime()
+  // 每秒更新时间
+  timeTimer = setInterval(updateTime, 1000)
+})
+
+onUnmounted(() => {
+  if (timeTimer) {
+    clearInterval(timeTimer)
+  }
 })
 </script>
 
@@ -230,6 +323,30 @@ onMounted(() => {
 
 .summary-row {
   margin-bottom: 16px;
+}
+
+/* 时间信息卡片 */
+.time-card :deep(.el-card__body) {
+  padding: 16px 20px;
+}
+
+.time-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.time-label {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+
+.time-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+  font-variant-numeric: tabular-nums;
 }
 
 .summary-card {

@@ -1,7 +1,11 @@
 // Package api Web API 层，路由定义与接口实现
 package api
 
-import "github.com/gin-gonic/gin"
+import (
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
 
 // SetupRouter 配置并返回 Gin 路由引擎
 func SetupRouter(
@@ -13,6 +17,7 @@ func SetupRouter(
 	notifHandler *NotificationHandler,
 	jwtSecret []byte,
 	fixedJWTSecret bool,
+	startTime ...time.Time,
 ) *gin.Engine {
 	r := gin.Default()
 
@@ -24,11 +29,16 @@ func SetupRouter(
 		api.POST("/register", authHandler.Register)      // 首次注册
 		api.POST("/login", authHandler.Login)
 
-		// 系统信息（公开，用于前端显示开发模式警告）
+		// 系统信息（公开，用于前端显示开发模式警告和运行时间）
 		api.GET("/system-info", func(c *gin.Context) {
-			c.JSON(200, gin.H{
+			resp := gin.H{
 				"fixed_jwt_secret": fixedJWTSecret,
-			})
+			}
+			// 如果传入了启动时间，返回给前端用于计算运行时长
+			if len(startTime) > 0 {
+				resp["start_time"] = startTime[0].Format("2006-01-02T15:04:05Z07:00")
+			}
+			c.JSON(200, resp)
 		})
 
 		// 受保护接口（需要 JWT 认证）

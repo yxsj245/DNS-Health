@@ -165,6 +165,9 @@ func createProviderFactory(encryptKey []byte) scheduler.ProviderFactory {
 	}
 }
 
+// 程序启动时间（用于计算运行时长）
+var startTime = time.Now()
+
 func main() {
 	// 解析命令行参数
 	jwtSecretFlag := flag.String("jwt-secret", "", "指定固定的 JWT 签名密钥（开发调试用，不指定则每次启动随机生成）")
@@ -280,7 +283,7 @@ func main() {
 	// 8. 设置 Gin 模式并创建路由
 	gin.SetMode(cfg.Server.Mode)
 	useFixedSecret := *jwtSecretFlag != ""
-	router := api.SetupRouter(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, jwtSecret, useFixedSecret)
+	router := api.SetupRouter(authHandler, credHandler, taskHandler, statusHandler, poolHandler, notifHandler, jwtSecret, useFixedSecret, startTime)
 
 	// 9. 嵌入前端静态文件服务
 	// 如果 web/dist 目录存在，提供静态文件服务
