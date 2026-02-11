@@ -1,6 +1,6 @@
 services:
   dns-health-monitor:
-    image: 
+    image: xiaozhu674/dns-health:latest
     container_name: dns-health-monitor
     restart: unless-stopped
     ports:

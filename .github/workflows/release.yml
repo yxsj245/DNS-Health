@@ -13,6 +13,9 @@ on:
 env:
   DOCKER_IMAGE: xiaozhu674/dns-health
 
+permissions:
+  contents: write
+
 jobs:
   # ==================== Docker 构建推送 ====================
   docker:
