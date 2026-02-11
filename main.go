@@ -27,6 +27,7 @@ import (
 	"dns-health-monitor/internal/provider"
 	"dns-health-monitor/internal/provider/aliyun"
 	"dns-health-monitor/internal/provider/cloudflare"
+	"dns-health-monitor/internal/provider/tencentcloud"
 	"dns-health-monitor/internal/scheduler"
 
 	"github.com/gin-gonic/gin"
@@ -168,6 +169,13 @@ func createProviderFactory(encryptKey []byte) scheduler.ProviderFactory {
 				return nil, fmt.Errorf("Cloudflare 凭证缺少 api_token")
 			}
 			return cloudflare.NewCloudflareDNSClient(apiToken), nil
+		case "tencentcloud":
+			secretID := fields["secret_id"]
+			secretKey := fields["secret_key"]
+			if secretID == "" || secretKey == "" {
+				return nil, fmt.Errorf("腾讯云凭证缺少 secret_id 或 secret_key")
+			}
+			return tencentcloud.NewTencentCloudDNSClient(secretID, secretKey), nil
 		default:
 			return nil, fmt.Errorf("不支持的服务商类型: %s", credential.ProviderType)
 		}

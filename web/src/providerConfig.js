@@ -31,6 +31,26 @@ const providerConfig = {
       }
     ]
   },
+  // 腾讯云 DNS 服务商凭证配置
+  tencentcloud: {
+    label: '腾讯云',
+    fields: [
+      {
+        key: 'secret_id',
+        label: 'SecretId',
+        placeholder: '请输入腾讯云 SecretId',
+        type: 'text',
+        required: true
+      },
+      {
+        key: 'secret_key',
+        label: 'SecretKey',
+        placeholder: '请输入腾讯云 SecretKey',
+        type: 'password',
+        required: true
+      }
+    ]
+  },
   // Cloudflare DNS 服务商凭证配置
   cloudflare: {
     label: 'Cloudflare',
