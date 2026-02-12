@@ -42,6 +42,8 @@ func InitDB(dbPath string) (*gorm.DB, error) {
 		&model.HealthMonitorTask{},
 		&model.HealthMonitorTarget{},
 		&model.HealthMonitorResult{},
+		// 新增：记录级别切换状态表
+		&model.RecordSwitchState{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)

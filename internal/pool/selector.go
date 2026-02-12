@@ -31,6 +31,11 @@ type ResourceSelector interface {
 	// 仅考虑健康状态的资源，优先选择延迟最低的
 	// 返回资源值（IP或域名），如果没有健康资源则返回错误
 	SelectBestResource(ctx context.Context, poolID uint) (string, error)
+
+	// SelectBestResourceExcluding 从解析池中选择最优资源，排除已使用的资源
+	// excludeValues: 需要排除的资源值列表（已被其他记录使用的备用IP）
+	// 确保同一解析池中的资源不会被重复分配给不同的异常记录
+	SelectBestResourceExcluding(ctx context.Context, poolID uint, excludeValues []string) (string, error)
 }
 
 // SelectionStrategy 选择策略接口
@@ -120,12 +125,23 @@ func NewResourceSelectorWithStrategy(db *gorm.DB, strategy SelectionStrategy) Re
 // 2. 如果没有健康资源，返回 ErrNoHealthyResource
 // 3. 使用配置的选择策略从健康资源中选择一个
 func (r *resourceSelectorImpl) SelectBestResource(ctx context.Context, poolID uint) (string, error) {
-	// 查询解析池中所有健康状态的资源
+	return r.SelectBestResourceExcluding(ctx, poolID, nil)
+}
+
+// SelectBestResourceExcluding 从解析池中选择最优资源，排除已使用的资源
+// excludeValues 为需要排除的资源值列表，确保不会重复分配
+func (r *resourceSelectorImpl) SelectBestResourceExcluding(ctx context.Context, poolID uint, excludeValues []string) (string, error) {
+	// 构建查询：健康状态的资源
+	query := r.db.WithContext(ctx).
+		Where("pool_id = ? AND health_status = ?", poolID, string(model.HealthStatusHealthy))
+
+	// 如果有需要排除的值，添加 NOT IN 条件
+	if len(excludeValues) > 0 {
+		query = query.Where("value NOT IN ?", excludeValues)
+	}
+
 	var healthyResources []model.PoolResource
-	if err := r.db.WithContext(ctx).
-		Where("pool_id = ? AND health_status = ?", poolID, string(model.HealthStatusHealthy)).
-		Order("avg_latency_ms ASC").
-		Find(&healthyResources).Error; err != nil {
+	if err := query.Order("avg_latency_ms ASC").Find(&healthyResources).Error; err != nil {
 		return "", err
 	}
 

@@ -52,8 +52,43 @@
       </el-descriptions>
     </el-card>
 
-    <!-- 切换状态卡片：仅在已切换状态时显示 -->
-    <el-card v-if="task.is_switched" class="switch-card" shadow="never">
+    <!-- 切换状态卡片：仅在切换解析类型且有切换记录时显示 -->
+    <el-card v-if="task.is_switched && task.task_type === 'switch'" class="switch-card" shadow="never" v-loading="switchStatesLoading">
+      <template #header>
+        <div style="display: flex; justify-content: space-between; align-items: center">
+          <span class="card-title">切换状态</span>
+          <el-tag type="danger">{{ switchedCount }} 条记录已切换</el-tag>
+        </div>
+      </template>
+      <!-- 多条记录的切换状态表格 -->
+      <el-table
+        v-if="switchStates.length > 0"
+        :data="switchStates"
+        border
+        stripe
+        style="width: 100%"
+        empty-text="暂无切换记录"
+      >
+        <el-table-column prop="record_ip" label="原始 IP" min-width="140" />
+        <el-table-column label="状态" min-width="80">
+          <template #default="{ row }">
+            <el-tag v-if="row.is_switched" type="danger">已切换</el-tag>
+            <el-tag v-else type="success">已恢复</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="original_value" label="原始值" min-width="140" />
+        <el-table-column prop="current_value" label="当前值" min-width="140" />
+        <el-table-column prop="updated_at" label="更新时间" min-width="160" />
+      </el-table>
+      <!-- 兼容旧数据：如果没有记录级别的切换状态，显示任务级别的 -->
+      <el-descriptions v-else :column="2" border>
+        <el-descriptions-item label="原始值">{{ task.original_value || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="当前值">{{ task.current_value || '-' }}</el-descriptions-item>
+      </el-descriptions>
+    </el-card>
+
+    <!-- 切换状态卡片：非 switch 类型（CDN等）使用旧的展示方式 -->
+    <el-card v-else-if="task.is_switched" class="switch-card" shadow="never">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center">
           <span class="card-title">切换状态</span>
@@ -448,6 +483,11 @@ const cnameInfo = reactive({
   threshold_type: 'count'
 })
 
+// 记录级别切换状态
+const switchStates = ref([])
+const switchStatesLoading = ref(false)
+const switchedCount = computed(() => switchStates.value.filter(s => s.is_switched).length)
+
 // ==================== 计算属性 ====================
 
 /**
@@ -499,6 +539,10 @@ const fetchTask = async () => {
   try {
     const response = await api.get(`/tasks/${taskId.value}`)
     Object.assign(task, response.data)
+    // 如果是切换解析类型且已切换，自动获取记录级别的切换状态
+    if (task.task_type === 'switch' && task.is_switched) {
+      fetchSwitchStates()
+    }
   } catch (error) {
     ElMessage.error('获取任务信息失败')
   } finally {
@@ -666,6 +710,23 @@ const fetchCnameInfo = async () => {
     ElMessage.error('获取CNAME信息失败')
   } finally {
     cnameLoading.value = false
+  }
+}
+
+/**
+ * 获取记录级别的切换状态
+ * 调用 GET /api/tasks/:id/switch-states
+ */
+const fetchSwitchStates = async () => {
+  if (task.task_type !== 'switch' || !task.is_switched) return
+  switchStatesLoading.value = true
+  try {
+    const response = await api.get(`/tasks/${taskId.value}/switch-states`)
+    switchStates.value = response.data || []
+  } catch (error) {
+    console.error('获取记录切换状态失败', error)
+  } finally {
+    switchStatesLoading.value = false
   }
 }
 

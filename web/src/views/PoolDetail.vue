@@ -86,6 +86,16 @@
           </template>
         </el-table-column>
 
+        <!-- 使用状态列 -->
+        <el-table-column label="使用状态" min-width="140">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.in_use" :content="'正在被 ' + row.in_use_by + ' 使用'" placement="top">
+              <el-tag type="warning">使用中</el-tag>
+            </el-tooltip>
+            <el-tag v-else type="info">空闲</el-tag>
+          </template>
+        </el-table-column>
+
         <!-- 启用状态列 -->
         <el-table-column label="探测状态" min-width="100">
           <template #default="{ row }">

@@ -395,3 +395,25 @@ type HealthMonitorResult struct {
 	ErrorMsg  string    // 错误信息
 	ProbedAt  time.Time `gorm:"index"` // 探测时间
 }
+
+// RecordSwitchState 单条DNS记录的切换状态
+// 用于"切换解析"类型任务中，跟踪每条DNS记录的独立切换状态。
+// 当域名有多条解析记录时（如 A 记录有多个 IP），每条记录可以独立进行故障转移和回切。
+type RecordSwitchState struct {
+	ID     uint `gorm:"primaryKey"`
+	TaskID uint `gorm:"index;not null"` // 所属探测任务ID
+
+	// DNS记录标识
+	RecordID   string `gorm:"not null"` // DNS记录ID（云服务商分配）
+	RecordType string `gorm:"not null"` // 记录类型: A / AAAA
+	RecordIP   string `gorm:"not null"` // 原始IP地址
+
+	// 切换状态
+	IsSwitched    bool   `gorm:"default:false"` // 是否已切换到备用资源
+	OriginalValue string // 原始解析值（用于回切）
+	CurrentValue  string // 当前解析值（切换后的备用值）
+	BackupSource  string // 备用资源来源描述（如解析池名称）
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}

@@ -587,6 +587,9 @@ func (h *TaskHandler) DeleteTask(c *gin.Context) {
 		return
 	}
 
+	// 清理关联的记录切换状态
+	h.DB.Where("task_id = ?", id).Delete(&model.RecordSwitchState{})
+
 	// 通知调度器移除任务（如果调度器不为 nil）
 	// 需求 5.4: 删除任务后 Scheduler 停止探测并清理缓存
 	if h.Scheduler != nil {
@@ -600,4 +603,68 @@ func (h *TaskHandler) DeleteTask(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "任务已删除"})
+}
+
+// RecordSwitchStateResponse 记录切换状态响应
+type RecordSwitchStateResponse struct {
+	ID            uint   `json:"id"`
+	TaskID        uint   `json:"task_id"`
+	RecordID      string `json:"record_id"`
+	RecordType    string `json:"record_type"`
+	RecordIP      string `json:"record_ip"`
+	IsSwitched    bool   `json:"is_switched"`
+	OriginalValue string `json:"original_value"`
+	CurrentValue  string `json:"current_value"`
+	BackupSource  string `json:"backup_source,omitempty"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+// GetRecordSwitchStates 获取任务的记录级别切换状态
+// GET /api/tasks/:id/switch-states
+// 返回该任务下每条DNS记录的独立切换状态
+func (h *TaskHandler) GetRecordSwitchStates(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的任务 ID"})
+		return
+	}
+
+	// 验证任务存在
+	var task model.ProbeTask
+	if err := h.DB.First(&task, id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询任务失败"})
+		return
+	}
+
+	// 查询记录切换状态
+	var states []model.RecordSwitchState
+	if err := h.DB.Where("task_id = ?", id).Order("created_at ASC").Find(&states).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询记录切换状态失败"})
+		return
+	}
+
+	resp := make([]RecordSwitchStateResponse, 0, len(states))
+	for _, s := range states {
+		resp = append(resp, RecordSwitchStateResponse{
+			ID:            s.ID,
+			TaskID:        s.TaskID,
+			RecordID:      s.RecordID,
+			RecordType:    s.RecordType,
+			RecordIP:      s.RecordIP,
+			IsSwitched:    s.IsSwitched,
+			OriginalValue: s.OriginalValue,
+			CurrentValue:  s.CurrentValue,
+			BackupSource:  s.BackupSource,
+			CreatedAt:     s.CreatedAt.Format("2006-01-02 15:04:05"),
+			UpdatedAt:     s.UpdatedAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	c.JSON(http.StatusOK, resp)
 }

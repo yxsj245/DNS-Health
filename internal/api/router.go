@@ -109,8 +109,9 @@ func SetupRouterWithHealthMonitor(
 			authorized.GET("/tasks/:id", taskHandler.GetTask)
 			authorized.PUT("/tasks/:id", taskHandler.UpdateTask)
 			authorized.DELETE("/tasks/:id", taskHandler.DeleteTask)
-			authorized.POST("/tasks/:id/pause", taskHandler.PauseTask)   // 暂停任务
-			authorized.POST("/tasks/:id/resume", taskHandler.ResumeTask) // 恢复任务
+			authorized.POST("/tasks/:id/pause", taskHandler.PauseTask)                    // 暂停任务
+			authorized.POST("/tasks/:id/resume", taskHandler.ResumeTask)                  // 恢复任务
+			authorized.GET("/tasks/:id/switch-states", taskHandler.GetRecordSwitchStates) // 记录级别切换状态
 
 			// 状态与历史查询
 			authorized.GET("/tasks/:id/history", statusHandler.GetHistory)

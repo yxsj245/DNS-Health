@@ -25,13 +25,13 @@ type ProviderFactory func(credential model.Credential) (provider.DNSProvider, er
 // FailoverExecutor 故障转移执行器接口
 // 负责执行DNS记录的切换操作，包括切换到备用资源和切换回原始资源
 type FailoverExecutor interface {
-	// SwitchToBackup 切换到备用资源
+	// SwitchToBackup 切换到备用资源（整体切换，兼容CNAME等场景）
 	// 1. 调用DNS Provider的UpdateRecordValue更新DNS记录
 	// 2. 更新ProbeTask的OriginalValue（保存当前值）、CurrentValue（设为备用值）、IsSwitched = true
 	// 3. 记录操作日志到OperationLog表
 	SwitchToBackup(ctx context.Context, task *model.ProbeTask, backupValue string) error
 
-	// SwitchBack 切换回原始资源
+	// SwitchBack 切换回原始资源（整体回切，兼容CNAME等场景）
 	// 1. 调用DNS Provider的UpdateRecordValue恢复原始值
 	// 2. 更新ProbeTask的CurrentValue = OriginalValue、IsSwitched = false
 	// 3. 记录操作日志
@@ -40,6 +40,23 @@ type FailoverExecutor interface {
 	// ShouldSwitchBack 判断是否应该回切
 	// 检查条件：task.IsSwitched && task.SwitchBackPolicy == "auto"
 	ShouldSwitchBack(task *model.ProbeTask) bool
+
+	// SwitchRecordToBackup 按单条DNS记录切换到备用资源
+	// 用于A/AAAA多条记录场景，只替换异常的那一条记录
+	// recordID: 要切换的DNS记录ID
+	// originalIP: 该记录的原始IP
+	// backupValue: 备用资源值
+	SwitchRecordToBackup(ctx context.Context, task *model.ProbeTask, recordID, originalIP, backupValue string) error
+
+	// SwitchRecordBack 按单条DNS记录回切到原始值
+	// 用于A/AAAA多条记录场景，只恢复已切换的那一条记录
+	SwitchRecordBack(ctx context.Context, task *model.ProbeTask, state *model.RecordSwitchState) error
+
+	// GetRecordSwitchStates 获取任务的所有记录切换状态
+	GetRecordSwitchStates(ctx context.Context, taskID uint) ([]model.RecordSwitchState, error)
+
+	// HasAnySwitchedRecord 检查任务是否有任何已切换的记录
+	HasAnySwitchedRecord(ctx context.Context, taskID uint) (bool, error)
 }
 
 // ========== ShouldSwitchBack 纯函数（导出，便于测试） ==========
@@ -252,6 +269,155 @@ func (e *failoverExecutorImpl) SwitchBack(ctx context.Context, task *model.Probe
 // 委托给导出的纯函数 ShouldSwitchBack
 func (e *failoverExecutorImpl) ShouldSwitchBack(task *model.ProbeTask) bool {
 	return ShouldSwitchBack(task)
+}
+
+// SwitchRecordToBackup 按单条DNS记录切换到备用资源
+// 用于A/AAAA多条记录场景，只替换异常的那一条记录，其他记录不受影响
+func (e *failoverExecutorImpl) SwitchRecordToBackup(ctx context.Context, task *model.ProbeTask, recordID, originalIP, backupValue string) error {
+	if task == nil {
+		return fmt.Errorf("任务不能为空")
+	}
+	if recordID == "" || backupValue == "" {
+		return fmt.Errorf("记录ID和备用资源值不能为空")
+	}
+
+	// 获取DNS Provider
+	prov, err := e.getProvider(task.CredentialID)
+	if err != nil {
+		e.saveOperationLog(task.ID, "switch_to_backup", recordID, backupValue, task.RecordType, false,
+			fmt.Sprintf("获取DNS Provider失败: %v", err))
+		return fmt.Errorf("获取DNS Provider失败: %w", err)
+	}
+
+	// 调用DNS Provider更新该条记录的值
+	if err := prov.UpdateRecordValue(ctx, recordID, backupValue); err != nil {
+		e.saveOperationLog(task.ID, "switch_to_backup", recordID, backupValue, task.RecordType, false,
+			fmt.Sprintf("更新DNS记录失败: %v", err))
+		return fmt.Errorf("更新DNS记录 %s 失败: %w", recordID, err)
+	}
+
+	// 创建或更新该记录的切换状态
+	var state model.RecordSwitchState
+	result := e.db.WithContext(ctx).Where("task_id = ? AND record_id = ?", task.ID, recordID).First(&state)
+	if result.Error != nil {
+		// 不存在，创建新记录
+		state = model.RecordSwitchState{
+			TaskID:        task.ID,
+			RecordID:      recordID,
+			RecordType:    task.RecordType,
+			RecordIP:      originalIP,
+			IsSwitched:    true,
+			OriginalValue: originalIP,
+			CurrentValue:  backupValue,
+		}
+		if err := e.db.WithContext(ctx).Create(&state).Error; err != nil {
+			log.Printf("创建记录切换状态失败（任务ID=%d, 记录ID=%s）: %v", task.ID, recordID, err)
+		}
+	} else {
+		// 已存在，更新状态
+		if err := e.db.WithContext(ctx).Model(&state).Updates(map[string]interface{}{
+			"is_switched":    true,
+			"original_value": originalIP,
+			"current_value":  backupValue,
+		}).Error; err != nil {
+			log.Printf("更新记录切换状态失败（任务ID=%d, 记录ID=%s）: %v", task.ID, recordID, err)
+		}
+	}
+
+	// 同步更新任务级别的切换标记（只要有任何一条记录被切换，任务就标记为已切换）
+	if err := e.db.WithContext(ctx).Model(task).Updates(map[string]interface{}{
+		"is_switched": true,
+	}).Error; err != nil {
+		log.Printf("更新任务切换标记失败（任务ID=%d）: %v", task.ID, err)
+	}
+	task.IsSwitched = true
+
+	// 记录操作日志
+	detail := fmt.Sprintf("记录 %s: 从 %s 切换到备用资源 %s", recordID, originalIP, backupValue)
+	e.saveOperationLog(task.ID, "switch_to_backup", recordID, backupValue, task.RecordType, true, detail)
+
+	log.Printf("任务 %d: 记录 %s 成功切换到备用资源 %s（原始值: %s）", task.ID, recordID, backupValue, originalIP)
+	return nil
+}
+
+// SwitchRecordBack 按单条DNS记录回切到原始值
+// 用于A/AAAA多条记录场景，只恢复已切换的那一条记录
+func (e *failoverExecutorImpl) SwitchRecordBack(ctx context.Context, task *model.ProbeTask, state *model.RecordSwitchState) error {
+	if task == nil || state == nil {
+		return fmt.Errorf("任务和切换状态不能为空")
+	}
+	if !state.IsSwitched {
+		return fmt.Errorf("记录 %s 未处于切换状态，无需回切", state.RecordID)
+	}
+	if state.OriginalValue == "" {
+		return fmt.Errorf("记录 %s 的原始值为空，无法回切", state.RecordID)
+	}
+
+	// 获取DNS Provider
+	prov, err := e.getProvider(task.CredentialID)
+	if err != nil {
+		e.saveOperationLog(task.ID, "switch_back", state.RecordID, state.OriginalValue, state.RecordType, false,
+			fmt.Sprintf("获取DNS Provider失败: %v", err))
+		return fmt.Errorf("获取DNS Provider失败: %w", err)
+	}
+
+	// 需要找到当前记录的实际 RecordID（因为切换后记录ID可能变化）
+	// 先尝试用原始 RecordID 更新
+	if err := prov.UpdateRecordValue(ctx, state.RecordID, state.OriginalValue); err != nil {
+		e.saveOperationLog(task.ID, "switch_back", state.RecordID, state.OriginalValue, state.RecordType, false,
+			fmt.Sprintf("恢复DNS记录失败: %v", err))
+		return fmt.Errorf("恢复DNS记录 %s 失败: %w", state.RecordID, err)
+	}
+
+	previousValue := state.CurrentValue
+
+	// 更新切换状态
+	if err := e.db.WithContext(ctx).Model(state).Updates(map[string]interface{}{
+		"is_switched":   false,
+		"current_value": state.OriginalValue,
+	}).Error; err != nil {
+		log.Printf("更新记录切换状态失败（任务ID=%d, 记录ID=%s）: %v", task.ID, state.RecordID, err)
+	}
+	state.IsSwitched = false
+	state.CurrentValue = state.OriginalValue
+
+	// 检查是否还有其他已切换的记录，如果没有则清除任务级别的切换标记
+	hasSwitched, _ := e.HasAnySwitchedRecord(ctx, task.ID)
+	if !hasSwitched {
+		if err := e.db.WithContext(ctx).Model(task).Updates(map[string]interface{}{
+			"is_switched": false,
+		}).Error; err != nil {
+			log.Printf("更新任务切换标记失败（任务ID=%d）: %v", task.ID, err)
+		}
+		task.IsSwitched = false
+	}
+
+	// 记录操作日志
+	detail := fmt.Sprintf("记录 %s: 从备用资源 %s 切换回原始值 %s", state.RecordID, previousValue, state.OriginalValue)
+	e.saveOperationLog(task.ID, "switch_back", state.RecordID, state.OriginalValue, state.RecordType, true, detail)
+
+	log.Printf("任务 %d: 记录 %s 成功回切到原始值 %s（备用值: %s）", task.ID, state.RecordID, state.OriginalValue, previousValue)
+	return nil
+}
+
+// GetRecordSwitchStates 获取任务的所有记录切换状态
+func (e *failoverExecutorImpl) GetRecordSwitchStates(ctx context.Context, taskID uint) ([]model.RecordSwitchState, error) {
+	var states []model.RecordSwitchState
+	if err := e.db.WithContext(ctx).Where("task_id = ?", taskID).Find(&states).Error; err != nil {
+		return nil, fmt.Errorf("查询记录切换状态失败: %w", err)
+	}
+	return states, nil
+}
+
+// HasAnySwitchedRecord 检查任务是否有任何已切换的记录
+func (e *failoverExecutorImpl) HasAnySwitchedRecord(ctx context.Context, taskID uint) (bool, error) {
+	var count int64
+	if err := e.db.WithContext(ctx).Model(&model.RecordSwitchState{}).
+		Where("task_id = ? AND is_switched = ?", taskID, true).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // ========== 内部辅助方法 ==========

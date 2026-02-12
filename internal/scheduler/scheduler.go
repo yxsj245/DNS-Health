@@ -1207,21 +1207,37 @@ func (s *Scheduler) executeCNAMESwitchProbe(ctx context.Context, runner *taskRun
 		// 未切换且失败数量达到阈值 -> 触发故障转移
 		s.triggerCNAMEFailover(ctx, runner, prov)
 	} else if task.IsSwitched && failedCount < threshold {
-		// 已切换且原域名恢复健康（失败数量低于阈值）-> 判断是否回切
+		// 已切换且当前域名恢复健康（失败数量低于阈值）-> 判断是否回切
 		s.evaluateCNAMESwitchBack(ctx, runner, prov)
+	} else if task.IsSwitched && failedCount >= threshold && threshold > 0 {
+		// 已切换但备用域名也故障了
+		if task.SwitchBackPolicy == string(model.SwitchBackManual) {
+			// 保持当前策略：重置切换状态，再次从解析池选择新的健康域名
+			log.Printf("任务 %d: 备用域名也故障（失败IP: %d/%d），再次触发故障转移", task.ID, failedCount, totalIPs)
+			if err := s.db.WithContext(ctx).Model(&runner.task).Updates(map[string]interface{}{
+				"is_switched":   false,
+				"current_value": "",
+			}).Error; err != nil {
+				log.Printf("任务 %d: 重置CNAME切换状态失败: %v", task.ID, err)
+			} else {
+				runner.task.IsSwitched = false
+				runner.task.CurrentValue = ""
+				s.triggerCNAMEFailover(ctx, runner, prov)
+			}
+		}
+		// 自动回切策略下不做额外处理，等待原始域名恢复后自动回切
 	}
 }
 
 // executeDirectSwitchProbe 执行A/AAAA切换类型任务的探测
-// 流程：
-// 1. 探测当前IP的健康状态
-// 2. 如果连续失败达到阈值，从解析池选择备用IP并切换
-// 3. 如果已切换且原IP恢复健康，根据回切策略决定是否回切
+// 支持多条解析记录的独立故障转移：
+// 1. 获取所有DNS记录，逐一探测每条记录的健康状态
+// 2. 对于已切换的记录，同时探测原始IP以判断是否回切
+// 3. 每条记录独立判断故障转移和回切，互不影响
 func (s *Scheduler) executeDirectSwitchProbe(ctx context.Context, runner *taskRunner, prov provider.DNSProvider) {
 	task := runner.task
 
-	// 1. 获取当前DNS记录，确定要探测的IP（带重试）
-	// A_AAAA 类型需要同时获取 A 和 AAAA 记录
+	// 1. 获取当前DNS记录（带重试）
 	var records []provider.DNSRecord
 	if model.RecordType(task.RecordType) == model.RecordTypeA_AAAA {
 		aRecords, err := retry.DoWithResult(ctx, s.retryConfig, func() ([]provider.DNSRecord, error) {
@@ -1265,70 +1281,110 @@ func (s *Scheduler) executeDirectSwitchProbe(ctx context.Context, runner *taskRu
 
 	timeout := time.Duration(task.TimeoutMs) * time.Millisecond
 
-	// 3. 探测当前IP
-	currentIP := records[0].Value
-	result := p.Probe(ctx, currentIP, task.ProbePort, timeout)
-
-	// 4. 更新计数器
-	counter := s.getOrCreateCounter(runner, currentIP, "online")
-	s.updateCounter(counter, result.Success)
-
-	// 5. 记录探测结果
-	s.saveProbeResult(task.ID, currentIP, result)
-
-	log.Printf("任务 %d: A/AAAA探测 IP=%s 成功=%v 连续失败=%d 连续成功=%d",
-		task.ID, currentIP, result.Success, counter.ConsecutiveFails, counter.ConsecutiveSuccesses)
-
-	// 6. 如果已切换到备用IP，还需要探测原始IP以判断是否回切
-	if task.IsSwitched && task.OriginalValue != "" && task.OriginalValue != currentIP {
-		origResult := p.Probe(ctx, task.OriginalValue, task.ProbePort, timeout)
-
-		// 使用带"original_"前缀的key来跟踪原始IP的计数器
-		origCounter := s.getOrCreateCounter(runner, "original_"+task.OriginalValue, "online")
-		s.updateCounter(origCounter, origResult.Success)
-
-		// 记录原始IP的探测结果
-		s.saveProbeResult(task.ID, task.OriginalValue, origResult)
-
-		// 判断是否应该回切
-		if s.failoverExecutor.ShouldSwitchBack(&runner.task) &&
-			origCounter.ConsecutiveSuccesses >= task.RecoverThreshold {
-			log.Printf("任务 %d: 原始IP %s 已恢复健康（连续成功 %d 次），执行回切",
-				task.ID, task.OriginalValue, origCounter.ConsecutiveSuccesses)
-
-			if err := s.failoverExecutor.SwitchBack(ctx, &runner.task); err != nil {
-				log.Printf("任务 %d: 回切失败: %v", task.ID, err)
-			} else {
-				// 回切成功，重置计数器
-				origCounter.ConsecutiveFails = 0
-				origCounter.ConsecutiveSuccesses = 0
-				// 同步更新runner中的task状态
-				runner.task = s.reloadTask(runner.task)
-				log.Printf("任务 %d: 回切成功，已恢复到原始IP %s", task.ID, task.OriginalValue)
-
-				// 发送恢复通知
-				if s.notificationManager != nil {
-					s.notificationManager.Notify(notification.NotificationEvent{
-						Type:           model.EventTypeRecovery,
-						TaskID:         task.ID,
-						Domain:         task.Domain,
-						SubDomain:      task.SubDomain,
-						OccurredAt:     time.Now(),
-						RecoveredValue: task.OriginalValue,
-						HealthStatus:   "healthy",
-					})
-				}
-			}
-		}
-		return
+	// 3. 加载当前所有记录的切换状态
+	var switchStates []model.RecordSwitchState
+	if s.failoverExecutor != nil {
+		switchStates, _ = s.failoverExecutor.GetRecordSwitchStates(ctx, task.ID)
+	}
+	// 构建 recordID -> switchState 的映射
+	stateMap := make(map[string]*model.RecordSwitchState)
+	for i := range switchStates {
+		stateMap[switchStates[i].RecordID] = &switchStates[i]
 	}
 
-	// 7. 未切换状态下，判断是否需要故障转移
-	if !task.IsSwitched && counter.ConsecutiveFails >= task.FailThreshold {
-		log.Printf("任务 %d: IP %s 连续失败 %d 次，达到阈值 %d，触发故障转移",
-			task.ID, currentIP, counter.ConsecutiveFails, task.FailThreshold)
+	// 4. 逐条探测每条DNS记录
+	for _, record := range records {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 
-		s.triggerDirectFailover(ctx, runner, prov)
+		currentIP := record.Value
+		state := stateMap[record.RecordID]
+
+		// 探测当前记录的IP
+		result := p.Probe(ctx, currentIP, task.ProbePort, timeout)
+
+		// 更新计数器
+		counterKey := record.RecordID + ":" + currentIP
+		counter := s.getOrCreateCounter(runner, counterKey, "online")
+		s.updateCounter(counter, result.Success)
+
+		// 记录探测结果
+		s.saveProbeResult(task.ID, currentIP, result)
+
+		log.Printf("任务 %d: A/AAAA探测 记录=%s IP=%s 成功=%v 连续失败=%d 连续成功=%d",
+			task.ID, record.RecordID, currentIP, result.Success, counter.ConsecutiveFails, counter.ConsecutiveSuccesses)
+
+		// 5. 判断该条记录是否已切换
+		isSwitched := state != nil && state.IsSwitched
+
+		if isSwitched && state.OriginalValue != "" && state.OriginalValue != currentIP {
+			if task.SwitchBackPolicy == string(model.SwitchBackAuto) {
+				// 自动回切策略：探测原始IP，恢复后回切
+				origResult := p.Probe(ctx, state.OriginalValue, task.ProbePort, timeout)
+
+				origCounterKey := "original_" + record.RecordID + ":" + state.OriginalValue
+				origCounter := s.getOrCreateCounter(runner, origCounterKey, "online")
+				s.updateCounter(origCounter, origResult.Success)
+
+				s.saveProbeResult(task.ID, state.OriginalValue, origResult)
+
+				log.Printf("任务 %d: 探测原始IP 记录=%s IP=%s 成功=%v 连续成功=%d",
+					task.ID, record.RecordID, state.OriginalValue, origResult.Success, origCounter.ConsecutiveSuccesses)
+
+				if origCounter.ConsecutiveSuccesses >= task.RecoverThreshold {
+					log.Printf("任务 %d: 记录 %s 原始IP %s 已恢复健康（连续成功 %d 次），执行回切",
+						task.ID, record.RecordID, state.OriginalValue, origCounter.ConsecutiveSuccesses)
+
+					if err := s.failoverExecutor.SwitchRecordBack(ctx, &runner.task, state); err != nil {
+						log.Printf("任务 %d: 记录 %s 回切失败: %v", task.ID, record.RecordID, err)
+					} else {
+						origCounter.ConsecutiveFails = 0
+						origCounter.ConsecutiveSuccesses = 0
+						runner.task = s.reloadTask(runner.task)
+						log.Printf("任务 %d: 记录 %s 回切成功，已恢复到原始IP %s", task.ID, record.RecordID, state.OriginalValue)
+
+						if s.notificationManager != nil {
+							s.notificationManager.Notify(notification.NotificationEvent{
+								Type:           model.EventTypeRecovery,
+								TaskID:         task.ID,
+								Domain:         task.Domain,
+								SubDomain:      task.SubDomain,
+								OccurredAt:     time.Now(),
+								RecoveredValue: state.OriginalValue,
+								HealthStatus:   "healthy",
+							})
+						}
+					}
+				}
+			} else {
+				// 保持当前策略：不探测原始IP，但如果当前备用IP也故障了，再次从解析池切换
+				if counter.ConsecutiveFails >= task.FailThreshold {
+					log.Printf("任务 %d: 记录 %s 备用IP %s 也连续失败 %d 次，达到阈值 %d，再次触发故障转移",
+						task.ID, record.RecordID, currentIP, counter.ConsecutiveFails, task.FailThreshold)
+
+					// 重置切换状态，允许再次切换
+					if err := s.db.WithContext(ctx).Model(state).Updates(map[string]interface{}{
+						"is_switched":   false,
+						"current_value": "",
+					}).Error; err != nil {
+						log.Printf("任务 %d: 重置记录 %s 切换状态失败: %v", task.ID, record.RecordID, err)
+					} else {
+						state.IsSwitched = false
+						// 重新触发故障转移，从解析池选择新的健康资源
+						s.triggerRecordFailover(ctx, runner, record)
+					}
+				}
+			}
+		} else if !isSwitched && counter.ConsecutiveFails >= task.FailThreshold {
+			// 该记录未切换且连续失败达到阈值，触发单条记录的故障转移
+			log.Printf("任务 %d: 记录 %s IP %s 连续失败 %d 次，达到阈值 %d，触发故障转移",
+				task.ID, record.RecordID, currentIP, counter.ConsecutiveFails, task.FailThreshold)
+
+			s.triggerRecordFailover(ctx, runner, record)
+		}
 	}
 }
 
@@ -1415,6 +1471,11 @@ func (s *Scheduler) triggerCNAMEFailover(ctx context.Context, runner *taskRunner
 		runner.task = s.reloadTask(runner.task)
 		log.Printf("任务 %d: 成功切换到备用域名 %s", task.ID, backupValue)
 
+		// 保持当前策略：将原始CNAME域名加入解析池，使其参与健康探测
+		if task.SwitchBackPolicy == string(model.SwitchBackManual) && runner.task.OriginalValue != "" {
+			s.addOriginalIPToPool(ctx, *task.PoolID, runner.task.OriginalValue)
+		}
+
 		// 发送故障转移通知
 		if s.notificationManager != nil {
 			s.notificationManager.Notify(notification.NotificationEvent{
@@ -1464,7 +1525,121 @@ func (s *Scheduler) evaluateCNAMESwitchBack(ctx context.Context, runner *taskRun
 	}
 }
 
-// triggerDirectFailover 触发A/AAAA直接切换故障转移
+// triggerRecordFailover 触发单条DNS记录的故障转移
+// 从解析池选择健康IP，仅替换指定的异常记录
+// 会排除已被同一任务其他记录使用的备用IP，避免重复分配
+func (s *Scheduler) triggerRecordFailover(ctx context.Context, runner *taskRunner, record provider.DNSRecord) {
+	task := runner.task
+
+	// 检查是否关联了解析池
+	if task.PoolID == nil {
+		log.Printf("任务 %d: 切换类型任务未关联解析池，无法执行故障转移", task.ID)
+		return
+	}
+
+	// 检查资源选择器是否可用
+	if s.resourceSelector == nil {
+		log.Printf("任务 %d: 资源选择器未配置，无法执行故障转移", task.ID)
+		return
+	}
+
+	// 收集该任务已使用的备用资源值，避免重复分配
+	var usedValues []string
+	if s.failoverExecutor != nil {
+		states, err := s.failoverExecutor.GetRecordSwitchStates(ctx, task.ID)
+		if err == nil {
+			for _, st := range states {
+				if st.IsSwitched && st.CurrentValue != "" {
+					usedValues = append(usedValues, st.CurrentValue)
+				}
+			}
+		}
+	}
+
+	// 从解析池选择最优的健康IP，排除已使用的
+	backupValue, err := s.resourceSelector.SelectBestResourceExcluding(ctx, *task.PoolID, usedValues)
+	if err != nil {
+		log.Printf("任务 %d: 从解析池 %d 选择备用资源失败（已排除 %d 个已用资源）: %v",
+			task.ID, *task.PoolID, len(usedValues), err)
+		s.saveOperationLog(task.ID, "switch_to_backup", record.RecordID, "", task.RecordType, false,
+			fmt.Sprintf("从解析池选择备用IP失败: %v（已排除已用资源: %v）", err, usedValues))
+		return
+	}
+
+	log.Printf("任务 %d: 记录 %s (IP=%s) 从解析池 %d 选择到备用IP: %s（已排除 %d 个已用资源）",
+		task.ID, record.RecordID, record.Value, *task.PoolID, backupValue, len(usedValues))
+
+	// 执行单条记录的切换
+	if err := s.failoverExecutor.SwitchRecordToBackup(ctx, &runner.task, record.RecordID, record.Value, backupValue); err != nil {
+		log.Printf("任务 %d: 记录 %s 切换到备用IP %s 失败: %v", task.ID, record.RecordID, backupValue, err)
+	} else {
+		runner.task = s.reloadTask(runner.task)
+		log.Printf("任务 %d: 记录 %s 成功切换到备用IP %s", task.ID, record.RecordID, backupValue)
+
+		// 保持当前策略：将故障IP加入解析池，使其参与健康探测
+		// 当故障IP恢复后，可以被重新选择用于后续的故障转移
+		if task.SwitchBackPolicy == string(model.SwitchBackManual) {
+			s.addOriginalIPToPool(ctx, *task.PoolID, record.Value)
+		}
+
+		// 发送故障转移通知
+		if s.notificationManager != nil {
+			s.notificationManager.Notify(notification.NotificationEvent{
+				Type:          model.EventTypeFailover,
+				TaskID:        task.ID,
+				Domain:        task.Domain,
+				SubDomain:     task.SubDomain,
+				OccurredAt:    time.Now(),
+				OriginalValue: record.Value,
+				BackupValue:   backupValue,
+				HealthStatus:  "unhealthy",
+			})
+		}
+	}
+}
+
+// addOriginalIPToPool 将故障IP加入解析池
+// 用于"保持当前"策略下，故障转移后将原始IP纳入解析池参与健康探测
+// 当原始IP恢复健康后，可以被重新选择用于后续的故障转移，形成循环
+func (s *Scheduler) addOriginalIPToPool(ctx context.Context, poolID uint, originalIP string) {
+	// 检查该IP是否已存在于解析池中
+	var existCount int64
+	if err := s.db.WithContext(ctx).Model(&model.PoolResource{}).
+		Where("pool_id = ? AND value = ?", poolID, originalIP).
+		Count(&existCount).Error; err != nil {
+		log.Printf("检查解析池资源是否存在失败: %v", err)
+		return
+	}
+
+	if existCount > 0 {
+		log.Printf("故障IP %s 已存在于解析池 %d 中，无需重复添加", originalIP, poolID)
+		return
+	}
+
+	// 添加到解析池，初始状态为 unhealthy（因为刚刚故障）
+	resource := model.PoolResource{
+		PoolID:       poolID,
+		Value:        originalIP,
+		HealthStatus: string(model.HealthStatusUnhealthy),
+		Enabled:      true,
+	}
+
+	if err := s.db.WithContext(ctx).Create(&resource).Error; err != nil {
+		log.Printf("将故障IP %s 加入解析池 %d 失败: %v", originalIP, poolID, err)
+		return
+	}
+
+	log.Printf("已将故障IP %s 加入解析池 %d（初始状态: unhealthy），等待探测恢复", originalIP, poolID)
+
+	// 通知解析池探测器开始探测新资源
+	if s.poolProber != nil {
+		if err := s.poolProber.StartPoolProbing(ctx, poolID); err != nil {
+			log.Printf("通知解析池探测器探测新资源失败: %v", err)
+		}
+	}
+}
+
+// triggerDirectFailover 触发A/AAAA直接切换故障转移（兼容旧逻辑，用于单记录场景）
 func (s *Scheduler) triggerDirectFailover(ctx context.Context, runner *taskRunner, _ provider.DNSProvider) {
 	task := runner.task
 

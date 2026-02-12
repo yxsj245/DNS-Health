@@ -323,7 +323,7 @@ func main() {
 	cleaner := scheduler.NewCleaner(db, cleanerConfig)
 	cleaner.Start(ctx)
 
-	poolHandler := api.NewPoolHandler(poolManager, poolProber)
+	poolHandler := api.NewPoolHandler(poolManager, poolProber, db)
 
 	// 8. 设置 Gin 模式并创建路由
 	gin.SetMode(cfg.Server.Mode)

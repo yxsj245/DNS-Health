@@ -17,12 +17,14 @@ import (
 	"dns-health-monitor/internal/prober"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // PoolHandler 解析池管理处理器
 type PoolHandler struct {
 	PoolManager pool.PoolManager
 	PoolProber  *pool.PoolProber // 可选，用于通知探测调度器（测试时可为 nil）
+	DB          *gorm.DB         // 数据库连接，用于查询资源使用状态
 
 	// 域名解析缓存：key 为 "poolID:resourceID"，缓存24小时
 	resolveCache   map[string]*resolveCacheEntry
@@ -48,10 +50,12 @@ type ipStatus struct {
 // NewPoolHandler 创建解析池管理处理器
 // pm: 解析池管理器实例
 // pp: 解析池探测调度器实例（可为 nil，测试时不需要真正的探测器）
-func NewPoolHandler(pm pool.PoolManager, pp *pool.PoolProber) *PoolHandler {
+// db: 数据库连接（可为 nil，测试时不需要）
+func NewPoolHandler(pm pool.PoolManager, pp *pool.PoolProber, db *gorm.DB) *PoolHandler {
 	return &PoolHandler{
 		PoolManager:  pm,
 		PoolProber:   pp,
+		DB:           db,
 		resolveCache: make(map[string]*resolveCacheEntry),
 	}
 }
@@ -102,6 +106,8 @@ type ResourceResponse struct {
 	ConsecutiveSuccesses int    `json:"consecutive_successes"`
 	AvgLatencyMs         int    `json:"avg_latency_ms"`
 	Enabled              bool   `json:"enabled"`
+	InUse                bool   `json:"in_use"`              // 是否已被故障转移使用
+	InUseBy              string `json:"in_use_by,omitempty"` // 使用该资源的任务域名
 	LastProbeAt          string `json:"last_probe_at,omitempty"`
 	CreatedAt            string `json:"created_at"`
 	UpdatedAt            string `json:"updated_at"`
@@ -413,6 +419,7 @@ func (h *PoolHandler) RemoveResource(c *gin.Context) {
 
 // ListResources 列出解析池中的所有资源及健康状态
 // GET /api/pools/:id/resources
+// 会标记已被故障转移使用的资源
 func (h *PoolHandler) ListResources(c *gin.Context) {
 	poolID, err := parsePoolID(c)
 	if err != nil {
@@ -429,10 +436,43 @@ func (h *PoolHandler) ListResources(c *gin.Context) {
 		return
 	}
 
-	// 构建响应列表
+	// 查询该解析池中已被故障转移使用的资源值
+	// 通过 RecordSwitchState 表关联 ProbeTask 的 pool_id 查询
+	usedValueMap := make(map[string]string) // value -> 使用该资源的任务域名
+	if h.DB != nil {
+		type usedInfo struct {
+			CurrentValue string
+			SubDomain    string
+			Domain       string
+		}
+		var usedInfos []usedInfo
+		h.DB.Raw(`
+			SELECT rss.current_value, pt.sub_domain, pt.domain
+			FROM record_switch_states rss
+			JOIN probe_tasks pt ON rss.task_id = pt.id
+			WHERE pt.pool_id = ? AND rss.is_switched = ?
+		`, poolID, true).Scan(&usedInfos)
+
+		for _, info := range usedInfos {
+			if info.CurrentValue != "" {
+				domain := info.Domain
+				if info.SubDomain != "" && info.SubDomain != "@" {
+					domain = info.SubDomain + "." + info.Domain
+				}
+				usedValueMap[info.CurrentValue] = domain
+			}
+		}
+	}
+
+	// 构建响应列表，标记已使用的资源
 	resp := make([]ResourceResponse, 0, len(resources))
 	for _, r := range resources {
-		resp = append(resp, resourceToResponse(r))
+		rr := resourceToResponse(r)
+		if domain, ok := usedValueMap[r.Value]; ok {
+			rr.InUse = true
+			rr.InUseBy = domain
+		}
+		resp = append(resp, rr)
 	}
 
 	c.JSON(http.StatusOK, resp)
