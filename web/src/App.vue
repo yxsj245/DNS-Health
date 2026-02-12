@@ -65,7 +65,7 @@
       <el-header class="app-header">
         <span class="header-title">DNSHealth 健康检测解析</span>
         <div class="header-right">
-          <span class="version-tag">v0.3.1</span>
+          <span class="version-tag">v0.4.0</span>
           <a href="https://afdian.com/a/xiaozhuhouses" target="_blank" rel="noopener noreferrer" class="sponsor-link" title="赞助支持">
             <el-icon :size="18"><Coffee /></el-icon>
             <span class="sponsor-text">赞助</span>
