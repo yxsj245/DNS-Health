@@ -224,7 +224,10 @@ func (p *PoolProber) runResourceProbeLoop(ctx context.Context, pool *model.Resol
 
 	// 立即执行一次探测
 	if p.connectivityChecker == nil || p.connectivityChecker.IsOnline() {
-		p.probeResource(ctx, pool, resource.ID)
+		if err := p.probeResource(ctx, pool, resource.ID); err == gorm.ErrRecordNotFound {
+			p.cleanupResourceCancel(pool.ID, resource.ID)
+			return
+		}
 	}
 
 	for {
@@ -237,32 +240,55 @@ func (p *PoolProber) runResourceProbeLoop(ctx context.Context, pool *model.Resol
 			if p.connectivityChecker != nil && !p.connectivityChecker.IsOnline() {
 				continue
 			}
-			p.probeResource(ctx, pool, resource.ID)
+			if err := p.probeResource(ctx, pool, resource.ID); err == gorm.ErrRecordNotFound {
+				p.cleanupResourceCancel(pool.ID, resource.ID)
+				return
+			}
 		}
 	}
 }
 
+// cleanupResourceCancel 清理已不存在资源的取消函数
+func (p *PoolProber) cleanupResourceCancel(poolID uint, resourceID uint) {
+	p.mu.RLock()
+	runner, exists := p.poolRunners[poolID]
+	p.mu.RUnlock()
+	if !exists {
+		return
+	}
+	runner.mu.Lock()
+	if cancel, ok := runner.resourceCancels[resourceID]; ok {
+		cancel()
+		delete(runner.resourceCancels, resourceID)
+	}
+	runner.mu.Unlock()
+}
+
 // probeResource 执行一次资源探测
-func (p *PoolProber) probeResource(ctx context.Context, pool *model.ResolutionPool, resourceID uint) {
+func (p *PoolProber) probeResource(ctx context.Context, pool *model.ResolutionPool, resourceID uint) error {
 	// 检查上下文是否已取消
 	select {
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	default:
 	}
 
 	// 从数据库重新加载资源信息（可能已被更新）
 	var resource model.PoolResource
 	if err := p.db.First(&resource, resourceID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			log.Printf("解析池 %d: 资源 %d 已不存在，停止探测", pool.ID, resourceID)
+			return gorm.ErrRecordNotFound
+		}
 		log.Printf("解析池 %d: 加载资源 %d 失败: %v", pool.ID, resourceID, err)
-		return
+		return nil // 其他数据库错误不停止探测，下次重试
 	}
 
 	// 创建探测器
 	prob := prober.NewProber(prober.ProbeProtocol(pool.ProbeProtocol))
 	if prob == nil {
 		log.Printf("解析池 %d: 不支持的探测协议 %s", pool.ID, pool.ProbeProtocol)
-		return
+		return nil
 	}
 
 	timeout := time.Duration(pool.TimeoutMs) * time.Millisecond
@@ -293,6 +319,8 @@ func (p *PoolProber) probeResource(ctx context.Context, pool *model.ResolutionPo
 	if err := p.db.Model(&resource).Update("last_probe_at", &now).Error; err != nil {
 		log.Printf("解析池 %d: 更新资源 %d 最后探测时间失败: %v", pool.ID, resource.ID, err)
 	}
+
+	return nil
 }
 
 // UpdateResourceHealth 更新资源健康状态（导出以便测试使用）
