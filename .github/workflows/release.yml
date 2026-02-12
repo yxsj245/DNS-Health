@@ -203,7 +203,8 @@ jobs:
           mkdir -p release/${{ matrix.name }}
           cp dns-health${{ matrix.suffix }} release/${{ matrix.name }}/
           cp config.yaml release/${{ matrix.name }}/
-          cp -r web/dist release/${{ matrix.name }}/web-dist/
+          mkdir -p release/${{ matrix.name }}/web/dist
+          cp -r web/dist/* release/${{ matrix.name }}/web/dist/
           cp README.md release/${{ matrix.name }}/ 2>/dev/null || true
 
           cd release
