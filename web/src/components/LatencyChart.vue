@@ -4,7 +4,13 @@
     <template #header>
       <div class="chart-header">
         <span class="card-title">延迟曲线图表</span>
-        <span class="probe-interval-info">检测周期: {{ probeIntervalSec }}s</span>
+        <div class="chart-header-right">
+          <span v-if="sseUrl" class="sse-indicator" :class="{ 'sse-connected': sseConnected }">
+            <span class="sse-dot"></span>
+            {{ sseConnected ? '实时' : '离线' }}
+          </span>
+          <span class="probe-interval-info">检测周期: {{ probeIntervalSec }}s</span>
+        </div>
       </div>
     </template>
 
@@ -57,7 +63,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -70,6 +76,7 @@ import {
   DataZoomComponent
 } from 'echarts/components'
 import api from '../api'
+import { useSSE } from '../useSSE'
 
 // 注册 ECharts 组件
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent])
@@ -91,6 +98,16 @@ const props = defineProps({
   probeIntervalSec: {
     type: Number,
     default: 30
+  },
+  // SSE 流式端点路径（如 /api/tasks/1/history/stream），为空则不启用实时更新
+  sseUrl: {
+    type: String,
+    default: ''
+  },
+  // SSE 事件类型过滤（如 probe_result 或 health_monitor_result）
+  sseEventType: {
+    type: String,
+    default: 'probe_result'
   }
 })
 
@@ -104,6 +121,36 @@ const dateRange = ref(getDefaultDateRange())
 const chartData = ref([])
 // 加载状态
 const loading = ref(false)
+// SSE 连接状态
+const sseConnected = ref(false)
+
+// ==================== SSE 实时推送 ====================
+
+// 延迟图表SSE连接，收到新探测结果时追加数据点
+const chartSSE = useSSE({
+  onMessage: (event) => {
+    if (event.type !== props.sseEventType || !event.data) return
+    // 仅追加当前选中IP的数据
+    if (event.data.ip !== selectedIp.value) return
+    // 检查时间是否在当前日期范围内
+    if (dateRange.value && dateRange.value.length === 2) {
+      const probedTime = new Date(event.data.probed_at.replace(' ', 'T'))
+      if (probedTime < dateRange.value[0]) return
+    }
+    // 追加新数据点到图表
+    chartData.value.push({
+      latency_ms: event.data.latency_ms,
+      probed_at: event.data.probed_at,
+      success: event.data.success
+    })
+    // 限制图表数据点数量，避免过多数据影响性能（保留最近2000个点）
+    if (chartData.value.length > 2000) {
+      chartData.value.shift()
+    }
+  },
+  onConnected: () => { sseConnected.value = true },
+  onError: () => { sseConnected.value = false }
+})
 
 /**
  * 获取默认日期范围（最近 24 小时）
@@ -298,6 +345,19 @@ watch(dateRange, (newRange) => {
     fetchLatencyData()
   }
 })
+
+// 监听 sseUrl 变化：建立或断开SSE连接
+watch(
+  () => props.sseUrl,
+  (newUrl) => {
+    if (newUrl) {
+      chartSSE.connect(newUrl)
+    } else {
+      chartSSE.disconnect()
+    }
+  },
+  { immediate: true }
+)
 </script>
 
 <style scoped>
@@ -313,6 +373,12 @@ watch(dateRange, (newRange) => {
   align-items: center;
 }
 
+.chart-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .card-title {
   font-size: 16px;
   font-weight: 600;
@@ -323,6 +389,36 @@ watch(dateRange, (newRange) => {
 .probe-interval-info {
   font-size: 13px;
   color: #909399;
+}
+
+/* SSE连接状态指示器 */
+.sse-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.sse-indicator.sse-connected {
+  color: #67c23a;
+}
+
+.sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #909399;
+}
+
+.sse-connected .sse-dot {
+  background-color: #67c23a;
+  animation: sse-pulse 2s infinite;
+}
+
+@keyframes sse-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 /* 工具栏 */

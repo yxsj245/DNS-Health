@@ -14,6 +14,7 @@ import (
 	"dns-health-monitor/internal/notification"
 	"dns-health-monitor/internal/prober"
 	"dns-health-monitor/internal/provider"
+	"dns-health-monitor/internal/sse"
 
 	"gorm.io/gorm"
 )
@@ -509,6 +510,16 @@ func (e *MonitorExecutor) saveResult(ctx context.Context, taskID uint, ip string
 	if err := e.db.WithContext(ctx).Create(&record).Error; err != nil {
 		return fmt.Errorf("保存探测结果失败: %w", err)
 	}
+
+	// 发布SSE事件，实时推送健康监控探测结果到前端
+	sse.GetHub().PublishJSON(sse.EventHealthMonitorResult, map[string]interface{}{
+		"task_id":    record.TaskID,
+		"ip":         record.IP,
+		"success":    record.Success,
+		"latency_ms": record.LatencyMs,
+		"error_msg":  record.ErrorMsg,
+		"probed_at":  record.ProbedAt.Format("2006-01-02 15:04:05"),
+	})
 
 	return nil
 }

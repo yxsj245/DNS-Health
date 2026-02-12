@@ -3,7 +3,13 @@
   <div class="system-log-page">
     <!-- 页面头部 -->
     <div class="page-header">
-      <h2 class="page-title">系统日志</h2>
+      <h2 class="page-title">
+        系统日志
+        <span class="sse-indicator" :class="{ 'sse-connected': sseConnected }">
+          <span class="sse-dot"></span>
+          {{ sseConnected ? '实时' : '离线' }}
+        </span>
+      </h2>
     </div>
 
     <!-- 筛选区域 -->
@@ -157,6 +163,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api'
+import { useSSE } from '../useSSE'
 
 // ==================== 状态定义 ====================
 
@@ -179,6 +186,58 @@ const pagination = reactive({
   pageSize: 20,
   total: 0
 })
+
+// ==================== SSE 实时推送 ====================
+
+const sseConnected = ref(false)
+
+// 系统日志SSE连接（接收操作日志和通知日志）
+const systemLogSSE = useSSE({
+  onMessage: (event) => {
+      if (!event.data) return
+      // 仅在第一页且无筛选条件时实时插入
+      if (pagination.page !== 1 || filters.source || filters.type || filters.success) return
+
+      let newEntry = null
+      if (event.type === 'operation_log') {
+        newEntry = {
+          id: event.data.id,
+          source: 'operation',
+          task_id: event.data.task_id,
+          task_name: '',
+          type: event.data.operation_type,
+          success: event.data.success,
+          detail: event.data.detail,
+          extra: event.data.ip,
+          error_msg: '',
+          timestamp: event.data.operated_at
+        }
+      } else if (event.type === 'notification_log') {
+        newEntry = {
+          id: event.data.id,
+          source: 'notification',
+          task_id: event.data.task_id,
+          task_name: '',
+          type: event.data.event_type,
+          success: event.data.success,
+          detail: event.data.detail,
+          extra: event.data.channel_type,
+          error_msg: event.data.error_msg || '',
+          timestamp: event.data.sent_at
+        }
+      }
+      if (newEntry) {
+        logList.value.unshift(newEntry)
+        pagination.total++
+        if (logList.value.length > pagination.pageSize) {
+          logList.value.pop()
+        }
+      }
+    },
+    onConnected: () => { sseConnected.value = true },
+    onError: () => { sseConnected.value = false }
+  }
+)
 
 // ==================== 辅助函数 ====================
 
@@ -282,6 +341,7 @@ const handlePageChange = (page) => {
 
 onMounted(() => {
   fetchLogs()
+  systemLogSSE.connect('/api/system-logs/stream')
 })
 </script>
 
@@ -302,6 +362,40 @@ onMounted(() => {
   font-size: 20px;
   color: #303133;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* SSE连接状态指示器 */
+.sse-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #909399;
+}
+
+.sse-indicator.sse-connected {
+  color: #67c23a;
+}
+
+.sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #909399;
+}
+
+.sse-connected .sse-dot {
+  background-color: #67c23a;
+  animation: sse-pulse 2s infinite;
+}
+
+@keyframes sse-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 /* 筛选区域卡片 */

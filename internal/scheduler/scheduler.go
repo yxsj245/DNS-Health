@@ -21,6 +21,7 @@ import (
 	"dns-health-monitor/internal/prober"
 	"dns-health-monitor/internal/provider"
 	"dns-health-monitor/internal/retry"
+	"dns-health-monitor/internal/sse"
 
 	"gorm.io/gorm"
 )
@@ -2073,6 +2074,17 @@ func (s *Scheduler) saveProbeResult(taskID uint, ip string, result prober.ProbeR
 	if err := s.db.Create(&record).Error; err != nil {
 		log.Printf("保存探测结果失败: %v", err)
 	}
+
+	// 发布SSE事件，实时推送探测结果到前端
+	sse.GetHub().PublishJSON(sse.EventProbeResult, map[string]interface{}{
+		"id":         record.ID,
+		"task_id":    record.TaskID,
+		"ip":         record.IP,
+		"success":    record.Success,
+		"latency_ms": record.LatencyMs,
+		"error_msg":  record.ErrorMsg,
+		"probed_at":  record.ProbedAt.Format("2006-01-02 15:04:05"),
+	})
 }
 
 // saveOperationLog 保存操作日志到数据库
@@ -2091,4 +2103,17 @@ func (s *Scheduler) saveOperationLog(taskID uint, opType, recordID, ip, recordTy
 	if err := s.db.Create(&logEntry).Error; err != nil {
 		log.Printf("保存操作日志失败: %v", err)
 	}
+
+	// 发布SSE事件，实时推送操作日志到前端
+	sse.GetHub().PublishJSON(sse.EventOperationLog, map[string]interface{}{
+		"id":             logEntry.ID,
+		"task_id":        logEntry.TaskID,
+		"operation_type": logEntry.OperationType,
+		"record_id":      logEntry.RecordID,
+		"ip":             logEntry.IP,
+		"record_type":    logEntry.RecordType,
+		"success":        logEntry.Success,
+		"detail":         logEntry.Detail,
+		"operated_at":    logEntry.OperatedAt.Format("2006-01-02 15:04:05"),
+	})
 }

@@ -14,6 +14,8 @@
       :apiUrl="`/tasks/${taskId}`"
       :ipList="latencyIpList"
       :probeIntervalSec="task.probe_interval_sec"
+      :sseUrl="`/api/tasks/${taskId}/history/stream`"
+      sseEventType="probe_result"
     />
 
     <!-- 任务基本信息 -->
@@ -106,7 +108,7 @@
       <el-tabs v-model="activeTab" @tab-change="handleTabChange">
         <!-- 探测历史标签页 -->
         <el-tab-pane label="探测历史" name="history">
-          <!-- 筛选栏：IP + 状态 -->
+          <!-- 筛选栏：IP + 状态 + SSE状态 -->
           <div class="filter-bar">
             <el-input
               v-model="historyIpFilter"
@@ -129,6 +131,10 @@
               <el-option label="成功" value="true" />
               <el-option label="失败" value="false" />
             </el-select>
+            <span class="sse-indicator" :class="{ 'sse-connected': historySSEConnected }">
+              <span class="sse-dot"></span>
+              {{ historySSEConnected ? '实时' : '离线' }}
+            </span>
           </div>
 
           <!-- 探测历史表格 -->
@@ -172,7 +178,7 @@
 
         <!-- 操作日志标签页 -->
         <el-tab-pane label="操作日志" name="logs">
-          <!-- 筛选栏：操作类型 + 时间范围 + IP + 状态 -->
+          <!-- 筛选栏：操作类型 + 时间范围 + IP + 状态 + SSE状态 -->
           <div class="filter-bar">
             <el-select
               v-model="logsOperationType"
@@ -226,6 +232,10 @@
               <el-option label="成功" value="true" />
               <el-option label="失败" value="false" />
             </el-select>
+            <span class="sse-indicator" :class="{ 'sse-connected': logsSSEConnected }">
+              <span class="sse-dot"></span>
+              {{ logsSSEConnected ? '实时' : '离线' }}
+            </span>
           </div>
 
           <!-- 操作日志表格 -->
@@ -401,11 +411,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { ref, reactive, onMounted, computed, watch, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link } from '@element-plus/icons-vue'
 import api from '../api'
+import { useSSE } from '../useSSE'
 import LatencyChart from '../components/LatencyChart.vue'
 
 // ==================== 路由 ====================
@@ -487,6 +498,51 @@ const cnameInfo = reactive({
 const switchStates = ref([])
 const switchStatesLoading = ref(false)
 const switchedCount = computed(() => switchStates.value.filter(s => s.is_switched).length)
+
+// ==================== SSE 实时推送 ====================
+
+// SSE连接状态指示
+const historySSEConnected = ref(false)
+const logsSSEConnected = ref(false)
+
+// 探测历史SSE连接
+const historySSE = useSSE({
+  onMessage: (event) => {
+    // 收到新的探测结果，插入到表格顶部
+    if (event.type === 'probe_result' && event.data) {
+      // 仅在第一页且无筛选条件时实时插入
+      if (historyPage.value === 1 && !historyIpFilter.value && !historyStatusFilter.value) {
+        historyData.value.unshift(event.data)
+        historyTotal.value++
+        // 限制前端显示条数，避免内存溢出
+        if (historyData.value.length > historyPageSize.value) {
+          historyData.value.pop()
+        }
+      }
+    }
+  },
+  onConnected: () => { historySSEConnected.value = true },
+  onError: () => { historySSEConnected.value = false }
+})
+
+// 操作日志SSE连接
+const logsSSE = useSSE({
+  onMessage: (event) => {
+    // 收到新的操作日志，插入到表格顶部
+    if (event.type === 'operation_log' && event.data) {
+      // 仅在第一页且无筛选条件时实时插入
+      if (logsPage.value === 1 && !logsIpFilter.value && !logsStatusFilter.value && !logsOperationType.value) {
+        logsData.value.unshift(event.data)
+        logsTotal.value++
+        if (logsData.value.length > logsPageSize.value) {
+          logsData.value.pop()
+        }
+      }
+    }
+  },
+  onConnected: () => { logsSSEConnected.value = true },
+  onError: () => { logsSSEConnected.value = false }
+})
 
 // ==================== 计算属性 ====================
 
@@ -731,14 +787,24 @@ const fetchSwitchStates = async () => {
 }
 
 /**
- * 标签页切换时加载对应数据
+ * 标签页切换时加载对应数据并管理SSE连接
  * @param {string} tabName - 标签页名称
  */
 const handleTabChange = (tabName) => {
+  // 断开非当前标签页的SSE连接
+  if (tabName !== 'history') {
+    historySSE.disconnect()
+  }
+  if (tabName !== 'logs') {
+    logsSSE.disconnect()
+  }
+
   if (tabName === 'history') {
     fetchHistory()
+    historySSE.connect(`/api/tasks/${taskId.value}/history/stream`)
   } else if (tabName === 'logs') {
     fetchLogs()
+    logsSSE.connect(`/api/tasks/${taskId.value}/logs/stream`)
   } else if (tabName === 'ips') {
     fetchIPs()
   } else if (tabName === 'cname') {
@@ -748,21 +814,29 @@ const handleTabChange = (tabName) => {
 
 // ==================== 生命周期 ====================
 
-// 页面加载时获取任务信息、延迟图表 IP 列表和探测历史
+// 页面加载时获取任务信息、延迟图表 IP 列表和探测历史，并建立SSE连接
 onMounted(() => {
   fetchTask()
   fetchLatencyIpList()
   fetchHistory()
+  // 默认标签页为探测历史，建立SSE连接
+  historySSE.connect(`/api/tasks/${taskId.value}/history/stream`)
 })
 
-// 监听路由参数变化，组件复用时重新加载数据
+// 监听路由参数变化，组件复用时重新加载数据并重建SSE连接
 watch(() => route.params.id, (newId, oldId) => {
   if (newId && newId !== oldId) {
+    // 断开旧的SSE连接
+    historySSE.disconnect()
+    logsSSE.disconnect()
     // 重置标签页到默认
     activeTab.value = 'history'
     fetchTask()
     fetchLatencyIpList()
     fetchHistory()
+    // 重新建立SSE连接（新的taskId）
+    // 需要等待下一个tick让computed更新
+    setTimeout(() => historySSE.connect(`/api/tasks/${taskId.value}/history/stream`), 100)
   }
 })
 </script>
@@ -851,6 +925,40 @@ watch(() => route.params.id, (newId, oldId) => {
 /* 筛选栏 */
 .filter-bar {
   margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* SSE连接状态指示器 */
+.sse-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 12px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.sse-indicator.sse-connected {
+  color: #67c23a;
+}
+
+.sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #909399;
+}
+
+.sse-connected .sse-dot {
+  background-color: #67c23a;
+  animation: sse-pulse 2s infinite;
+}
+
+@keyframes sse-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 /* 分页栏 */

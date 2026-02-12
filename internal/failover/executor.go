@@ -13,6 +13,7 @@ import (
 	"dns-health-monitor/internal/model"
 	"dns-health-monitor/internal/pool"
 	"dns-health-monitor/internal/provider"
+	"dns-health-monitor/internal/sse"
 
 	"gorm.io/gorm"
 )
@@ -477,4 +478,17 @@ func (e *failoverExecutorImpl) saveOperationLog(taskID uint, opType, recordID, i
 	if err := e.db.Create(&logEntry).Error; err != nil {
 		log.Printf("保存操作日志失败（任务ID=%d, 操作=%s）: %v", taskID, opType, err)
 	}
+
+	// 发布SSE事件，实时推送操作日志到前端
+	sse.GetHub().PublishJSON(sse.EventOperationLog, map[string]interface{}{
+		"id":             logEntry.ID,
+		"task_id":        logEntry.TaskID,
+		"operation_type": logEntry.OperationType,
+		"record_id":      logEntry.RecordID,
+		"ip":             logEntry.IP,
+		"record_type":    logEntry.RecordType,
+		"success":        logEntry.Success,
+		"detail":         logEntry.Detail,
+		"operated_at":    logEntry.OperatedAt.Format("2006-01-02 15:04:05"),
+	})
 }

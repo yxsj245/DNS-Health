@@ -14,6 +14,8 @@
       :apiUrl="`/health-monitors/${taskId}`"
       :ipList="latencyIpList"
       :probeIntervalSec="task.probe_interval_sec"
+      :sseUrl="`/api/health-monitors/${taskId}/results/stream`"
+      sseEventType="health_monitor_result"
     />
 
     <!-- 任务基本信息卡片 -->
@@ -44,7 +46,7 @@
 
         <!-- 探测历史标签页 -->
         <el-tab-pane label="探测历史" name="history">
-          <!-- 筛选栏：IP + 状态 -->
+          <!-- 筛选栏：IP + 状态 + SSE状态 -->
           <div class="filter-bar">
             <el-input
               v-model="historyIpFilter"
@@ -67,6 +69,10 @@
               <el-option label="成功" value="true" />
               <el-option label="失败" value="false" />
             </el-select>
+            <span class="sse-indicator" :class="{ 'sse-connected': historySSEConnected }">
+              <span class="sse-dot"></span>
+              {{ historySSEConnected ? '实时' : '离线' }}
+            </span>
           </div>
 
           <!-- 延迟统计概览（使用CSS进度条可视化） -->
@@ -199,6 +205,7 @@ import { ref, reactive, onMounted, computed, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api'
+import { useSSE } from '../useSSE'
 import LatencyChart from '../components/LatencyChart.vue'
 
 // ==================== 路由 ====================
@@ -266,6 +273,28 @@ const historyPage = ref(1)
 const historyPageSize = ref(20)
 const historyIpFilter = ref('')
 const historyStatusFilter = ref('')
+
+// ==================== SSE 实时推送 ====================
+
+const historySSEConnected = ref(false)
+
+// 健康监控探测历史SSE连接
+const historySSE = useSSE({
+  onMessage: (event) => {
+    if (event.type === 'health_monitor_result' && event.data) {
+      // 仅在第一页且无筛选条件时实时插入
+      if (historyPage.value === 1 && !historyIpFilter.value && !historyStatusFilter.value) {
+        historyData.value.unshift(event.data)
+        historyTotal.value++
+        if (historyData.value.length > historyPageSize.value) {
+          historyData.value.pop()
+        }
+      }
+    }
+  },
+  onConnected: () => { historySSEConnected.value = true },
+  onError: () => { historySSEConnected.value = false }
+})
 
 // ==================== 计算属性 ====================
 
@@ -384,18 +413,22 @@ const fetchHistory = async () => {
 const handleTabChange = (tabName) => {
   if (tabName === 'history') {
     fetchHistory()
-  } else if (tabName === 'targets') {
-    // 监控目标数据已在任务详情中返回，重新获取最新数据
+    historySSE.connect(`/api/health-monitors/${taskId}/results/stream`)
+  } else {
+    historySSE.disconnect()
+  }
+  if (tabName === 'targets') {
     fetchTask()
   }
 }
 
 // ==================== 生命周期 ====================
 
-// 页面加载时获取任务信息和探测历史
+// 页面加载时获取任务信息和探测历史，并建立SSE连接
 onMounted(() => {
   fetchTask()
   fetchHistory()
+  historySSE.connect(`/api/health-monitors/${taskId}/results/stream`)
 })
 </script>
 
@@ -440,6 +473,40 @@ onMounted(() => {
 /* 筛选栏 */
 .filter-bar {
   margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* SSE连接状态指示器 */
+.sse-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 12px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.sse-indicator.sse-connected {
+  color: #67c23a;
+}
+
+.sse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #909399;
+}
+
+.sse-connected .sse-dot {
+  background-color: #67c23a;
+  animation: sse-pulse 2s infinite;
+}
+
+@keyframes sse-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 /* 分页栏 */

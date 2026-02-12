@@ -42,21 +42,25 @@ func JWTAuthMiddleware(jwtSecret []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 从 Authorization 头中提取 token
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
+		tokenString := ""
+
+		if authHeader != "" {
+			// 检查 Bearer 前缀
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "认证令牌格式错误"})
+				c.Abort()
+				return
+			}
+			tokenString = parts[1]
+		} else if queryToken := c.Query("token"); queryToken != "" {
+			// 支持通过URL参数传递token（用于SSE等不支持自定义Header的场景）
+			tokenString = queryToken
+		} else {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "未提供认证令牌"})
 			c.Abort()
 			return
 		}
-
-		// 检查 Bearer 前缀
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "认证令牌格式错误"})
-			c.Abort()
-			return
-		}
-
-		tokenString := parts[1]
 
 		// 解析并验证 token
 		claims := &JWTClaims{}

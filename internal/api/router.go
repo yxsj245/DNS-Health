@@ -37,6 +37,8 @@ func SetupRouterWithHealthMonitor(
 	fixedJWTSecret bool,
 	startTime ...time.Time,
 ) *gin.Engine {
+	// 创建SSE处理器
+	sseHandler := NewSSEHandler()
 	r := gin.Default()
 
 	// API 路由组
@@ -115,7 +117,9 @@ func SetupRouterWithHealthMonitor(
 
 			// 状态与历史查询
 			authorized.GET("/tasks/:id/history", statusHandler.GetHistory)
+			authorized.GET("/tasks/:id/history/stream", sseHandler.StreamTaskHistory) // SSE流式推送探测历史
 			authorized.GET("/tasks/:id/logs", statusHandler.GetLogs)
+			authorized.GET("/tasks/:id/logs/stream", sseHandler.StreamTaskLogs) // SSE流式推送操作日志
 			authorized.GET("/tasks/:id/ips", statusHandler.GetTaskIPs)
 			authorized.POST("/tasks/:id/ips/exclude", statusHandler.ExcludeIP)
 			authorized.POST("/tasks/:id/ips/include", statusHandler.IncludeIP)
@@ -128,6 +132,7 @@ func SetupRouterWithHealthMonitor(
 
 			// 统一系统日志（合并操作日志和通知记录）
 			authorized.GET("/system-logs", statusHandler.GetSystemLogs)
+			authorized.GET("/system-logs/stream", sseHandler.StreamSystemLogs) // SSE流式推送系统日志
 
 			// 解析池管理
 			authorized.POST("/pools", poolHandler.CreatePool)
@@ -176,6 +181,7 @@ func SetupRouterWithHealthMonitor(
 					hm.POST("/:id/resume", healthMonitorHandler.ResumeHealthMonitor)
 					hm.DELETE("/:id", healthMonitorHandler.DeleteHealthMonitor)
 					hm.GET("/:id/results", healthMonitorHandler.GetHealthMonitorResults)
+					hm.GET("/:id/results/stream", sseHandler.StreamHealthMonitorResults) // SSE流式推送探测结果
 					hm.GET("/:id/latency", healthMonitorHandler.GetHealthMonitorLatency) // 延迟数据查询
 				}
 			}

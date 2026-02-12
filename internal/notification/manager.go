@@ -9,6 +9,7 @@ import (
 
 	"dns-health-monitor/internal/crypto"
 	"dns-health-monitor/internal/model"
+	"dns-health-monitor/internal/sse"
 
 	"gorm.io/gorm"
 )
@@ -118,6 +119,18 @@ func (m *NotificationManager) processNotification(event NotificationEvent) {
 		if err := m.db.Create(&notifLog).Error; err != nil {
 			log.Printf("保存通知记录失败: %v", err)
 		}
+
+		// 发布SSE事件，实时推送通知日志到前端
+		sse.GetHub().PublishJSON(sse.EventNotificationLog, map[string]interface{}{
+			"id":           notifLog.ID,
+			"task_id":      notifLog.TaskID,
+			"event_type":   notifLog.EventType,
+			"channel_type": notifLog.ChannelType,
+			"success":      notifLog.Success,
+			"detail":       notifLog.Detail,
+			"error_msg":    notifLog.ErrorMsg,
+			"sent_at":      notifLog.SentAt.Format("2006-01-02 15:04:05"),
+		})
 	}
 }
 
