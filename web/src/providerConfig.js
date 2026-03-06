@@ -14,6 +14,8 @@
 const providerConfig = {
   aliyun: {
     label: '阿里云',
+    keyUrl: 'https://ram.console.aliyun.com/profile/access-keys',
+    keyUrlText: '前往阿里云控制台创建 AccessKey',
     fields: [
       {
         key: 'access_key_id',
@@ -34,6 +36,8 @@ const providerConfig = {
   // 腾讯云 DNS 服务商凭证配置
   tencentcloud: {
     label: '腾讯云',
+    keyUrl: 'https://console.cloud.tencent.com/cam/capi',
+    keyUrlText: '前往腾讯云控制台创建密钥',
     fields: [
       {
         key: 'secret_id',
@@ -54,6 +58,8 @@ const providerConfig = {
   // Cloudflare DNS 服务商凭证配置
   cloudflare: {
     label: 'Cloudflare',
+    keyUrl: 'https://dash.cloudflare.com/profile/api-tokens',
+    keyUrlText: '前往 Cloudflare 创建 API Token',
     fields: [
       {
         key: 'api_token',
@@ -93,6 +99,19 @@ export function getProviderFields(providerType) {
  */
 export function getProviderLabel(providerType) {
   return providerConfig[providerType]?.label || providerType
+}
+
+/**
+ * 获取服务商密钥管理页面的链接信息
+ * @param {string} providerType - 服务商类型标识
+ * @returns {{url: string, text: string}|null} 链接信息，未找到返回 null
+ */
+export function getProviderKeyUrl(providerType) {
+  const config = providerConfig[providerType]
+  if (config?.keyUrl) {
+    return { url: config.keyUrl, text: config.keyUrlText || '前往创建密钥' }
+  }
+  return null
 }
 
 export default providerConfig

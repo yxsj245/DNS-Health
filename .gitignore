@@ -16,6 +16,8 @@ web/dist/
 # IDE
 .vscode/
 .idea/
+.kiro/
+.agents/
 
 # Air 热重载临时目录
 tmp/

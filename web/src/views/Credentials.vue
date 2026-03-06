@@ -98,6 +98,14 @@
           </el-select>
         </el-form-item>
 
+        <!-- 密钥管理页面链接：根据选中的服务商显示 -->
+        <div v-if="currentKeyUrl" class="key-url-hint">
+          <el-icon><Link /></el-icon>
+          <a :href="currentKeyUrl.url" target="_blank" rel="noopener noreferrer">
+            {{ currentKeyUrl.text }}
+          </a>
+        </div>
+
         <!-- 动态凭证字段：根据选中的服务商渲染 -->
         <template v-if="currentFields.length > 0">
           <el-form-item
@@ -131,8 +139,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Link } from '@element-plus/icons-vue'
 import api from '../api'
-import { getProviderOptions, getProviderFields, getProviderLabel } from '../providerConfig'
+import { getProviderOptions, getProviderFields, getProviderLabel, getProviderKeyUrl } from '../providerConfig'
 
 // ==================== 状态定义 ====================
 
@@ -164,6 +173,12 @@ const formRules = reactive({
 const currentFields = computed(() => {
   if (!form.provider_type) return []
   return getProviderFields(form.provider_type) || []
+})
+
+// 当前选中服务商的密钥管理链接
+const currentKeyUrl = computed(() => {
+  if (!form.provider_type) return null
+  return getProviderKeyUrl(form.provider_type)
 })
 
 // ==================== 辅助函数 ====================
@@ -336,5 +351,28 @@ onMounted(() => {
 .field-value {
   color: #303133;
   font-family: monospace;
+}
+
+/* 密钥管理链接样式 */
+.key-url-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  margin: 0 0 18px 120px;
+  background-color: #ecf5ff;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #409eff;
+}
+
+.key-url-hint a {
+  color: #409eff;
+  text-decoration: none;
+}
+
+.key-url-hint a:hover {
+  text-decoration: underline;
+  color: #337ecc;
 }
 </style>
