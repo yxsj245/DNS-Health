@@ -71,6 +71,46 @@
 
 ## 快速开始
 
+> 📖 完整部署文档请参阅 **[部署指南](docs/deployment.md)**，涵盖 Docker / Linux / Windows 三种部署方式的详细步骤。
+
+### Docker 部署（推荐）
+
+```yaml
+# docker-compose.yml
+services:
+  dns-health-monitor:
+    image: xiaozhu674/dns-health:latest
+    container_name: dns-health-monitor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    cap_add:
+      - NET_RAW
+```
+
+```bash
+docker compose up -d
+```
+
+### Linux / Windows 二进制部署
+
+1. 从 [Releases](https://github.com/yxsj245/DNS-Health/releases) 页面下载对应平台的压缩包
+2. 解压后修改 `config.yaml`（可选）
+3. 运行可执行文件（Linux 需 root 或 `setcap` 授权，Windows 需管理员身份）
+
+```bash
+# Linux
+sudo ./dns-health
+
+# Windows（管理员 PowerShell）
+.\dns-health.exe
+```
+
+启动后访问 `http://localhost:8080`，首次访问将进入注册页面创建管理员账号。
 
 ## 使用场景
 
@@ -115,7 +155,9 @@ npm run dev
 ### 目录说明
 - `.air.toml`：Air 热重载配置
 - `docker-compose.yml`：Docker 部署配置
-- `docs/`：开发文档
+- `docs/`：项目文档
+  - `deployment.md`：[部署指南](docs/deployment.md)（Docker / Linux / Windows）
+  - `development.md`：开发文档
 
 ## 许可证
 

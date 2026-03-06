@@ -148,6 +148,14 @@ jobs:
             cross_cc: x86_64-w64-mingw32-gcc
             cross_pkg: gcc-mingw-w64-x86-64
           - goos: linux
+            goarch: amd64
+            suffix: ""
+            archive: tar.gz
+            name: dns-health-linux-amd64
+            runner: ubuntu-latest
+            cross_cc: ""
+            cross_pkg: ""
+          - goos: linux
             goarch: arm64
             suffix: ""
             archive: tar.gz
