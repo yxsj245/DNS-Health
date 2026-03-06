@@ -13,8 +13,7 @@
   - [Docker 构建自定义镜像](#docker-构建自定义镜像)
   - [Docker 多架构支持](#docker-多架构支持)
 - [Linux 部署](#linux-部署)
-  - [使用预编译二进制文件](#linux-使用预编译二进制文件)
-  - [从源码编译](#linux-从源码编译)
+  - [下载与安装](#下载与安装)
   - [配置 Systemd 服务](#配置-systemd-服务)
   - [使用 Nginx 反向代理](#使用-nginx-反向代理)
 - [Windows 部署](#windows-部署)
@@ -32,9 +31,8 @@
 | 部署方式 | 要求 |
 |---------|------|
 | Docker | Docker Engine 20.10+ / Docker Compose V2+ |
-| Linux  | x86_64 或 ARM64 架构，glibc 2.17+ |
+| Linux  | x86_64 或 ARM64 架构 |
 | Windows | Windows 10/11 或 Windows Server 2016+，x86_64 架构 |
-| 源码编译 | Go 1.24+，Node.js 20+，npm 9+ |
 
 > [!IMPORTANT]
 > **ICMP 探测**（Ping）需要特殊权限：
@@ -173,31 +171,45 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ## Linux 部署
 
-### Linux 使用预编译二进制文件
+### 下载与安装
 
 **1. 下载发布包**
 
 前往 [Releases 页面](https://github.com/yxsj245/DNS-Health/releases) 下载对应架构的压缩包：
 
-- `dns-health-linux-arm64.tar.gz`（ARM64 架构）
+| 文件名 | 架构 | 适用场景 |
+|--------|------|----------|
+| `dns-health-linux-amd64.tar.gz` | x86_64 | 大多数云服务器、PC 服务器 |
+| `dns-health-linux-arm64.tar.gz` | ARM64 | 树莓派、ARM 云服务器、Apple Silicon (Linux VM) |
 
-> [!NOTE]
-> 如果需要 x86_64 版本，请从源码编译或使用 Docker 部署。
+> [!TIP]
+> 不确定架构？运行 `uname -m` 查看：`x86_64` 对应 amd64，`aarch64` 对应 arm64。
 
 **2. 解压并安装**
 
 ```bash
-# 解压
-tar -xzf dns-health-linux-arm64.tar.gz
+# 以 amd64 为例（arm64 请替换文件名）
+tar -xzf dns-health-linux-amd64.tar.gz
 
 # 移动到安装目录
-sudo mv dns-health-linux-arm64 /opt/dns-health
+sudo mv dns-health-linux-amd64 /opt/dns-health
 
 # 进入目录
 cd /opt/dns-health
 
 # 赋予执行权限
 chmod +x dns-health
+```
+
+解压后目录结构如下：
+
+```
+/opt/dns-health/
+├── dns-health              # 主程序
+├── config.yaml             # 配置文件
+├── web/
+│   └── dist/               # 前端静态文件
+└── data/                   # 数据目录（首次运行自动创建）
 ```
 
 **3. 修改配置（可选）**
@@ -218,6 +230,8 @@ sudo ./dns-health
 sudo nohup ./dns-health > /var/log/dns-health.log 2>&1 &
 ```
 
+启动后访问 `http://<服务器IP>:8080`，首次访问会进入注册页面，创建管理员账号。
+
 > [!TIP]
 > 建议使用 Systemd 服务管理，参见下文 [配置 Systemd 服务](#配置-systemd-服务)。
 
@@ -229,64 +243,21 @@ sudo nohup ./dns-health > /var/log/dns-health.log 2>&1 &
 sudo setcap cap_net_raw+ep /opt/dns-health/dns-health
 ```
 
-### Linux 从源码编译
-
-**1. 安装依赖**
+**6. 版本更新**
 
 ```bash
-# Ubuntu / Debian
-sudo apt update
-sudo apt install -y golang nodejs npm git
+# 停止服务
+sudo systemctl stop dns-health  # 如已配置 Systemd
 
-# CentOS / RHEL
-sudo yum install -y golang nodejs npm git
+# 下载新版本并解压
+tar -xzf dns-health-linux-amd64.tar.gz
 
-# 或使用官方安装方式
-# Go: https://go.dev/dl/
-# Node.js: https://nodejs.org/
-```
+# 替换二进制文件和前端文件（保留 data 目录和 config.yaml）
+sudo cp dns-health-linux-amd64/dns-health /opt/dns-health/
+sudo cp -r dns-health-linux-amd64/web/dist /opt/dns-health/web/
 
-确保版本满足要求：
-
-```bash
-go version    # 需要 1.24+
-node --version  # 需要 20+
-npm --version   # 需要 9+
-```
-
-**2. 克隆项目并编译**
-
-```bash
-# 克隆项目
-git clone https://github.com/yxsj245/DNS-Health.git
-cd DNS-Health
-
-# 编译前端
-cd web
-npm ci
-npm run build
-cd ..
-
-# 编译后端
-CGO_ENABLED=0 go build -ldflags="-s -w" -o dns-health .
-```
-
-**3. 部署文件**
-
-```bash
-# 创建安装目录
-sudo mkdir -p /opt/dns-health
-
-# 复制必要文件
-sudo cp dns-health /opt/dns-health/
-sudo cp config.yaml /opt/dns-health/
-sudo cp -r web/dist /opt/dns-health/web/dist
-
-# 创建数据目录
-sudo mkdir -p /opt/dns-health/data
-
-# 设置权限
-sudo chmod +x /opt/dns-health/dns-health
+# 重新启动
+sudo systemctl start dns-health
 ```
 
 ### 配置 Systemd 服务
