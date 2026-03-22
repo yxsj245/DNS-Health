@@ -145,37 +145,104 @@
       </el-table>
     </el-card>
 
-    <!-- 添加资源对话框 -->
+    <!-- 添加资源对话框（单条/批量两种模式） -->
     <el-dialog
       v-model="addResourceDialogVisible"
       title="添加资源"
-      width="480px"
+      width="560px"
       :close-on-click-modal="false"
       @closed="resetAddResourceForm"
     >
-      <el-form
-        ref="addResourceFormRef"
-        :model="addResourceForm"
-        :rules="addResourceFormRules"
-        label-width="80px"
-      >
-        <el-form-item :label="pool.resource_type === 'domain' ? '域名' : 'IP 地址'" prop="value">
+      <!-- 模式切换 Tab -->
+      <el-tabs v-model="addResourceMode" class="add-resource-tabs">
+        <!-- 单条模式 -->
+        <el-tab-pane label="单条添加" name="single">
+          <el-form
+            ref="addResourceFormRef"
+            :model="addResourceForm"
+            :rules="addResourceFormRules"
+            label-width="80px"
+          >
+            <el-form-item :label="pool.resource_type === 'domain' ? '域名' : 'IP 地址'" prop="value">
+              <el-input
+                v-model="addResourceForm.value"
+                :placeholder="pool.resource_type === 'domain' ? '请输入域名，例如 example.com' : '请输入 IP 地址，例如 1.2.3.4'"
+              />
+            </el-form-item>
+            <div class="add-resource-tip">
+              <el-icon><InfoFilled /></el-icon>
+              <span v-if="pool.resource_type === 'domain'">仅允许添加域名格式的资源</span>
+              <span v-else>仅允许添加 IP 地址格式的资源（支持 IPv4 和 IPv6）</span>
+            </div>
+          </el-form>
+        </el-tab-pane>
+
+        <!-- 批量模式 -->
+        <el-tab-pane label="批量添加" name="batch">
+          <div class="batch-add-tip">
+            <el-icon><InfoFilled /></el-icon>
+            <span v-if="pool.resource_type === 'domain'">每行输入一个域名，最多 500 条</span>
+            <span v-else>每行输入一个 IP 地址（支持 IPv4 和 IPv6），最多 500 条</span>
+          </div>
           <el-input
-            v-model="addResourceForm.value"
-            :placeholder="pool.resource_type === 'domain' ? '请输入域名，例如 example.com' : '请输入 IP 地址，例如 1.2.3.4'"
+            v-model="batchResourceText"
+            type="textarea"
+            :rows="12"
+            :placeholder="pool.resource_type === 'domain'
+              ? '请每行输入一个域名，例如：\nexample.com\nfoo.example.com\nbar.example.com'
+              : '请每行输入一个 IP 地址，例如：\n1.2.3.4\n5.6.7.8\n2001:db8::1'"
+            class="batch-textarea"
           />
-        </el-form-item>
-        <div class="add-resource-tip">
-          <el-icon><InfoFilled /></el-icon>
-          <span v-if="pool.resource_type === 'domain'">仅允许添加域名格式的资源</span>
-          <span v-else>仅允许添加 IP 地址格式的资源（支持 IPv4 和 IPv6）</span>
-        </div>
-      </el-form>
+          <div class="batch-count-tip" v-if="batchLineCount > 0">
+            已输入 {{ batchLineCount }} 条
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+
       <template #footer>
         <el-button @click="addResourceDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="addResourceLoading" @click="handleAddResourceSubmit">
-          确定添加
+        <el-button
+          type="primary"
+          :loading="addResourceLoading"
+          @click="addResourceMode === 'single' ? handleAddResourceSubmit() : handleBatchAddSubmit()"
+        >
+          {{ addResourceMode === 'single' ? '确定添加' : '批量添加' }}
         </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 批量添加结果对话框 -->
+    <el-dialog
+      v-model="batchResultDialogVisible"
+      title="批量添加结果"
+      width="600px"
+    >
+      <div class="batch-result-summary">
+        <div class="summary-item success">
+          <div class="summary-num">{{ batchResult.succeeded }}</div>
+          <div class="summary-label">新增成功</div>
+        </div>
+        <div class="summary-item skip">
+          <div class="summary-num">{{ batchResult.skipped }}</div>
+          <div class="summary-label">已存在跳过</div>
+        </div>
+        <div class="summary-item fail">
+          <div class="summary-num">{{ batchResult.failed }}</div>
+          <div class="summary-label">格式错误</div>
+        </div>
+      </div>
+
+      <!-- 失败条目详情 -->
+      <div v-if="batchResult.failedItems && batchResult.failedItems.length > 0" class="batch-failed-list">
+        <div class="batch-failed-title">格式错误的条目：</div>
+        <el-table :data="batchResult.failedItems" border size="small" style="width: 100%">
+          <el-table-column label="资源值" prop="value" min-width="160" />
+          <el-table-column label="错误原因" prop="error" min-width="200" show-overflow-tooltip />
+        </el-table>
+      </div>
+
+      <template #footer>
+        <el-button type="primary" @click="batchResultDialogVisible = false">确定</el-button>
       </template>
     </el-dialog>
 
@@ -236,7 +303,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { InfoFilled, Clock } from '@element-plus/icons-vue'
@@ -284,6 +351,23 @@ const addResourceLoading = ref(false)
 const addResourceFormRef = ref(null)
 const addResourceForm = reactive({
   value: ''
+})
+
+// 批量添加相关状态
+const addResourceMode = ref('single') // 'single' | 'batch'
+const batchResourceText = ref('')
+// 计算有效行数（忽略空行）
+const batchLineCount = computed(() =>
+  batchResourceText.value.split('\n').filter(line => line.trim() !== '').length
+)
+
+// 批量添加结果对话框
+const batchResultDialogVisible = ref(false)
+const batchResult = reactive({
+  succeeded: 0,
+  skipped: 0,
+  failed: 0,
+  failedItems: []
 })
 
 // 域名解析IP对话框
@@ -416,6 +500,8 @@ const resetAddResourceForm = () => {
     addResourceFormRef.value.resetFields()
   }
   addResourceForm.value = ''
+  batchResourceText.value = ''
+  addResourceMode.value = 'single'
 }
 
 const handleAddResourceSubmit = async () => {
@@ -434,6 +520,52 @@ const handleAddResourceSubmit = async () => {
       ElMessage.error(error.response.data.error)
     } else {
       ElMessage.error('添加资源失败')
+    }
+  } finally {
+    addResourceLoading.value = false
+  }
+}
+
+/**
+ * 批量添加资源
+ */
+const handleBatchAddSubmit = async () => {
+  // 解析有效行
+  const lines = batchResourceText.value
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l !== '')
+
+  if (lines.length === 0) {
+    ElMessage.warning('请至少输入一条资源')
+    return
+  }
+  if (lines.length > 500) {
+    ElMessage.warning('单次批量最多添加 500 条')
+    return
+  }
+
+  addResourceLoading.value = true
+  try {
+    const response = await api.post(`/pools/${poolId}/resources/batch`, { values: lines })
+    const data = response.data
+
+    // 填充结果
+    batchResult.succeeded = data.succeeded || 0
+    batchResult.skipped = data.skipped || 0
+    batchResult.failed = data.failed || 0
+    batchResult.failedItems = (data.results || []).filter(r => !r.success)
+
+    addResourceDialogVisible.value = false
+    batchResultDialogVisible.value = true
+
+    // 刷新列表和健康摘要
+    await Promise.all([fetchResources(), fetchHealth()])
+  } catch (error) {
+    if (error.response && error.response.data && error.response.data.error) {
+      ElMessage.error(error.response.data.error)
+    } else {
+      ElMessage.error('批量添加失败')
     }
   } finally {
     addResourceLoading.value = false
@@ -644,6 +776,11 @@ onMounted(() => {
   margin-bottom: 20px;
 }
 
+/* 添加资源对话框 Tab */
+.add-resource-tabs {
+  margin-top: -10px;
+}
+
 /* 添加资源提示 */
 .add-resource-tip {
   display: flex;
@@ -659,6 +796,100 @@ onMounted(() => {
 
 .add-resource-tip .el-icon {
   font-size: 14px;
+}
+
+/* 批量模式提示 */
+.batch-add-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #ecf5ff;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #409eff;
+  margin-bottom: 10px;
+}
+
+.batch-add-tip .el-icon {
+  font-size: 14px;
+}
+
+/* 批量文本区域 */
+.batch-textarea :deep(textarea) {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* 已输入行数提示 */
+.batch-count-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #909399;
+  text-align: right;
+}
+
+/* 批量结果摘要 */
+.batch-result-summary {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.summary-item {
+  flex: 1;
+  text-align: center;
+  padding: 16px;
+  border-radius: 8px;
+}
+
+.summary-item.success {
+  background: #f0f9eb;
+}
+
+.summary-item.skip {
+  background: #fdf6ec;
+}
+
+.summary-item.fail {
+  background: #fef0f0;
+}
+
+.summary-num {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.summary-item.success .summary-num {
+  color: #67c23a;
+}
+
+.summary-item.skip .summary-num {
+  color: #e6a23c;
+}
+
+.summary-item.fail .summary-num {
+  color: #f56c6c;
+}
+
+.summary-label {
+  font-size: 13px;
+  color: #606266;
+  margin-top: 8px;
+}
+
+/* 失败条目列表 */
+.batch-failed-list {
+  margin-top: 4px;
+}
+
+.batch-failed-title {
+  font-size: 14px;
+  color: #606266;
+  margin-bottom: 8px;
+  font-weight: 500;
 }
 
 /* 域名解析缓存信息 */

@@ -142,8 +142,9 @@ func SetupRouterWithHealthMonitor(
 			authorized.GET("/pools/:id/health", poolHandler.GetPoolHealth)
 			authorized.DELETE("/pools/:id", poolHandler.DeletePool)
 
-			// 解析池资源管理
+			// 解析池资源管理（batch 路由必须在 /:resource_id 之前注册，避免 "batch" 被当作 resource_id）
 			authorized.POST("/pools/:id/resources", poolHandler.AddResource)
+			authorized.POST("/pools/:id/resources/batch", poolHandler.BatchAddResources)
 			authorized.DELETE("/pools/:id/resources/:resource_id", poolHandler.RemoveResource)
 			authorized.GET("/pools/:id/resources", poolHandler.ListResources)
 			authorized.GET("/pools/:id/resources/:resource_id/resolve", poolHandler.ResolveDomainIPs)

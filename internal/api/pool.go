@@ -96,6 +96,28 @@ type AddResourceRequest struct {
 	Value string `json:"value"` // 资源值：IP地址或域名（必填）
 }
 
+// BatchAddResourcesRequest 批量添加资源请求体
+type BatchAddResourcesRequest struct {
+	Values []string `json:"values"` // 资源值列表（必填）
+}
+
+// BatchAddResourceResult 单条批量添加结果
+type BatchAddResourceResult struct {
+	Value   string `json:"value"`             // 资源值
+	Success bool   `json:"success"`           // 是否添加成功
+	Skipped bool   `json:"skipped,omitempty"` // 是否因重复而跳过
+	Error   string `json:"error,omitempty"`   // 错误信息（若失败）
+}
+
+// BatchAddResourcesResponse 批量添加资源响应
+type BatchAddResourcesResponse struct {
+	Total     int                      `json:"total"`      // 总提交数
+	Succeeded int                      `json:"succeeded"`  // 成功数
+	Skipped   int                      `json:"skipped"`    // 跳过（重复）数
+	Failed    int                      `json:"failed"`     // 失败数
+	Results   []BatchAddResourceResult `json:"results"`    // 每条结果详情
+}
+
 // ResourceResponse 资源响应
 type ResourceResponse struct {
 	ID                   uint   `json:"id"`
@@ -385,6 +407,109 @@ func (h *PoolHandler) AddResource(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "资源已添加"})
+}
+
+// BatchAddResources 批量向解析池添加资源
+// POST /api/pools/:id/resources/batch
+// 请求体: BatchAddResourcesRequest
+// 返回每条资源的添加结果，重复资源跳过（不报错），格式错误返回具体原因
+func (h *PoolHandler) BatchAddResources(c *gin.Context) {
+	poolID, err := parsePoolID(c)
+	if err != nil {
+		return
+	}
+
+	var req BatchAddResourcesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+		return
+	}
+
+	// 验证请求不为空
+	if len(req.Values) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "资源列表不能为空"})
+		return
+	}
+
+	// 限制单次批量最大数量
+	const maxBatchSize = 500
+	if len(req.Values) > maxBatchSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("单次批量最多添加 %d 条资源", maxBatchSize)})
+		return
+	}
+
+	results := make([]BatchAddResourceResult, 0, len(req.Values))
+	succeeded, skippedCount, failed := 0, 0, 0
+
+	// 逐条添加，统计结果
+	for _, v := range req.Values {
+		// 跳过空行
+		if v == "" {
+			continue
+		}
+
+		result := BatchAddResourceResult{Value: v}
+		addErr := h.PoolManager.AddResource(c.Request.Context(), poolID, v)
+		if addErr == nil {
+			// 添加成功
+			result.Success = true
+			succeeded++
+		} else if errors.Is(addErr, pool.ErrDuplicateResource) {
+			// 已存在，跳过
+			result.Success = true
+			result.Skipped = true
+			skippedCount++
+		} else if errors.Is(addErr, pool.ErrPoolNotFound) {
+			// 解析池不存在，直接返回错误（不继续处理）
+			c.JSON(http.StatusNotFound, gin.H{"error": "解析池不存在"})
+			return
+		} else if errors.Is(addErr, pool.ErrInvalidResourceFormat) {
+			// 格式错误
+			result.Success = false
+			result.Error = addErr.Error()
+			failed++
+		} else {
+			// 其他错误
+			result.Success = false
+			result.Error = "添加失败"
+			failed++
+		}
+		results = append(results, result)
+	}
+
+	// 对成功添加的资源通知探测调度器
+	if h.PoolProber != nil && succeeded > skippedCount {
+		resources, listErr := h.PoolManager.GetPoolResources(c.Request.Context(), poolID)
+		if listErr == nil {
+			// 构建已成功添加（非跳过）的资源值集合
+			newValues := make(map[string]bool)
+			for _, r := range results {
+				if r.Success && !r.Skipped {
+					newValues[r.Value] = true
+				}
+			}
+			// 对这批新资源逐一启动探测
+			for i := len(resources) - 1; i >= 0; i-- {
+				if newValues[resources[i].Value] {
+					_ = h.PoolProber.StartResourceProbing(c.Request.Context(), poolID, resources[i].ID)
+					delete(newValues, resources[i].Value)
+					if len(newValues) == 0 {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	resp := BatchAddResourcesResponse{
+		Total:     len(results),
+		Succeeded: succeeded - skippedCount, // 实际新增数（不含跳过）
+		Skipped:   skippedCount,
+		Failed:    failed,
+		Results:   results,
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // RemoveResource 从解析池移除资源
@@ -719,6 +844,7 @@ func (h *PoolHandler) resolveFromMultipleDNS(ctx context.Context, domain string)
 
 	seen := make(map[string]bool)
 	uniqueIPs := make([]string, 0)
+dnsLoop:
 	for i := 0; i < len(dnsServers); i++ {
 		select {
 		case res := <-resultCh:
@@ -729,7 +855,7 @@ func (h *PoolHandler) resolveFromMultipleDNS(ctx context.Context, domain string)
 				}
 			}
 		case <-queryCtx.Done():
-			break
+			break dnsLoop
 		}
 	}
 

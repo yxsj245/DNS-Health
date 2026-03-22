@@ -66,7 +66,7 @@
         <span class="header-title">DNSHealth 健康检测解析</span>
         <div class="header-right">
           <span class="version-tag">v0.4.1</span>
-          <a href="https://afdian.com/a/xiaozhuhouses" target="_blank" rel="noopener noreferrer" class="sponsor-link" title="赞助支持">
+          <a href="https://ifdian.net/a/xiaozhuhouses" target="_blank" rel="noopener noreferrer" class="sponsor-link" title="赞助支持">
             <el-icon :size="18"><Coffee /></el-icon>
             <span class="sponsor-text">赞助</span>
           </a>
@@ -83,7 +83,13 @@
 
       <!-- 内容区域 -->
       <el-main class="app-main">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <Transition name="fade-slide" mode="out-in">
+            <div :key="route.fullPath" class="page-wrapper">
+              <component :is="Component" />
+            </div>
+          </Transition>
+        </router-view>
       </el-main>
     </el-container>
   </el-container>
@@ -176,7 +182,7 @@ const checkSponsorDialog = () => {
  * 打开赞助页面
  */
 const openSponsorPage = () => {
-  window.open('https://afdian.com/a/xiaozhuhouses', '_blank')
+  window.open('https://ifdian.net/a/xiaozhuhouses', '_blank')
   showSponsorDialog.value = false
 }
 
@@ -251,6 +257,43 @@ html, body, #app {
   margin: 0;
   padding: 0;
   height: 100%;
+}
+
+/* ==================== 页面过渡动画 ==================== */
+
+/* 淡入淡出过渡（用于登录页） */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* 淡入 + 向上滑动过渡（用于主内容区） */
+.fade-slide-enter-active {
+  transition: all 0.3s ease-out;
+}
+
+.fade-slide-leave-active {
+  transition: all 0.2s ease-in;
+}
+
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+/* 页面过渡包裹层 */
+.page-wrapper {
+  min-height: 100%;
 }
 </style>
 
@@ -368,6 +411,8 @@ html, body, #app {
   background-color: #f0f2f5;
   overflow-y: auto;
 }
+
+
 
 /* 开发模式警告条 */
 .dev-warning-bar {
