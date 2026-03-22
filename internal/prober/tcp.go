@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -34,7 +35,8 @@ func (p *TCPProber) Probe(ctx context.Context, target string, port int, timeout 
 	}
 
 	// 构建目标地址
-	address := fmt.Sprintf("%s:%d", target, port)
+	// address := fmt.Sprintf("%s:%d", target, port)
+	address := net.JoinHostPort(target, strconv.Itoa(port))
 
 	// 创建带超时的拨号器
 	dialer := &net.Dialer{
